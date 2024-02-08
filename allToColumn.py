@@ -5,7 +5,7 @@ from pathlib import Path
 from collections import defaultdict
 
 
-file_name = r'c:\Data\ODData\hamakarskiy\Export\hor_pick.dat'
+file_name = r'c:\Data\ODData\hamakarskiy\Export\uv_v2_int_smAdd.dat'
 col = 0
 
 
