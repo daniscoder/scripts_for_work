@@ -5,8 +5,8 @@ from pathlib import Path
 from collections import defaultdict
 
 
-file_name = r'd:\ODData\hamakarskiy\Export\uv_v4_int_addSm.dat'
-col = 0
+file_name = r'E:\Processing\Hamakarskiy\2024-02-22_dt\dt_k2dil_all'
+col = 3
 
 
 def main():
