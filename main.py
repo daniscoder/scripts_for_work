@@ -3,7 +3,7 @@
 
 import sys
 import matplotlib.pyplot as plt
-from PyQt5.QtWidgets import QWidget, QPushButton, QApplication
+from PySide6.QtWidgets import QWidget, QPushButton, QApplication
 
 
 class Example(QWidget):
@@ -33,4 +33,4 @@ if __name__ == '__main__':
 
     app = QApplication(sys.argv)
     ex = Example()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
