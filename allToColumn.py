@@ -5,7 +5,7 @@ from pathlib import Path
 from collections import defaultdict
 
 
-file_name = r'E:\Processing\Hamakarskiy\2024-02-22_dt\dt_k2dil_all'
+file_name = r'e:\Processing\Hamakarskiy\Dop_Stat_2\Dop_stat2.txt'
 col = 3
 
 
