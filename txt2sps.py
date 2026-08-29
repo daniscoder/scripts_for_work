@@ -4,7 +4,7 @@
 from pathlib import Path
 from collections import defaultdict
 
-path_or_file = r"c:\Processing\Tallinskiy\sps\geom_target.txt"
+path_or_file = r"d:\Processing\Tallinskiy\sps\geom_mpfi5d.txt"
 
 ffid_name = 'IDENT_NUM'
 s_line_name = 'SOURCE_LINE_ID'
@@ -15,6 +15,7 @@ s_x_name = 'XCORD_SOURCE'
 s_y_name = 'YCORD_SOURCE'
 r_x_name = 'XCORD_DETECT'
 r_y_name = 'YCORD_DETECT'
+
 
 def check_string_number(s):
     try:
