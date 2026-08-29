@@ -26,6 +26,8 @@ def main():
                 with open(cmp_data_file, 'r') as f:
                     for s in f:
                         ls = s.split()
+                        if not ls:
+                            continue
                         if ls[0][0] in simvols:
                             cmp_data[ls[0]] = {
                                 'Line': int(float(ls[1])),
@@ -43,6 +45,8 @@ def main():
                             cmp = col = None
                             for s in f:
                                 ls = s.split()
+                                if not ls:
+                                    continue
                                 if ls[cmp_id] in cmp_data:
                                     if ls[cmp_id] != cmp:
                                         if cmp:
@@ -69,6 +73,8 @@ def main():
                         cmp = None
                         for s in f:
                             ls = s.split()
+                            if not ls:
+                                continue
                             if ls[cmp_id] != cmp:
                                 cmp = ls[cmp_id]
                                 fnew.write('{}\tNOT_USED\t{}\t{}\n'.format(cmp, ls[time_id], ls[vel_id]))

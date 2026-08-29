@@ -28,7 +28,7 @@ def main():
                                 detF = sub[detF_i: i]
                                 detL_i = i + 1
                             else:
-                                trsF = sub[trcF_i: i]
+                                trcF = sub[trcF_i: i]
                                 trcL_i = i + 1
                             toS = True
                         elif c == '(':
@@ -48,7 +48,7 @@ def main():
                             f = i + 1
                             toS = False
                             d = True
-                            fnew.write(w1 + '{:>4}{:>4}1{:<16}{:>8}{:>8}1\n'.format(trsF, trcL, line, detF, detL))
+                            fnew.write(w1 + '{:>4}{:>4}1{:<16}{:>8}{:>8}1\n'.format(trcF, trcL, line, detF, detL))
 
         fnew.close()
         fopen.close()

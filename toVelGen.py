@@ -13,6 +13,8 @@ def main():
         cmp = None
         for s in f:
             ls = s.split()
+            if not ls:
+                continue
             if ls[2] != cmp:
                 cmp = ls[2]
                 fnew.write('{}\tNOT_USED\t{}\t{}\n'.format(cmp, ls[3], ls[4]))

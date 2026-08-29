@@ -33,8 +33,8 @@ def main():
                                     ycord = ls[1]
                                 if len(ls) > 2:
                                     xcord = ls[3]
-                fnew.close
-                f.close
+                fnew.close()
+                f.close()
 
 
 if __name__ == '__main__':
