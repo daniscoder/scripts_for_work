@@ -25,24 +25,30 @@ def main():
                     cmp = None
                     vel = None
                     time = None
+
+                    def flush():
+                        # Последний CMP тоже надо выгрузить: раньше запись шла
+                        # только на смене CMP, и хвост файла терялся молча.
+                        if vel:
+                            np_vel = np.array(vel)
+                            vel_sembl = np.arange(1000, 8020, 20)
+                            time_sembl = np.interp(vel_sembl, np_vel, np.array(time))
+                            for i in range(len(vel_sembl)):
+                                fnew.write('{}\t{}\t{}\n'.format(cmp, vel_sembl[i], round(time_sembl[i], 0)))
+
                     for s in f:
                         ls = s.split()
-                        if ls[0][0] in simvols:
+                        if ls and ls[0][0] in simvols:
                             cmp_cur = int(ls[0])
                             if cmp_cur != cmp:
-                                if vel:
-                                    np_vel = np.array(vel)
-                                    vel_sembl = np.arange(int(np.min(np_vel)), int(np.max(np_vel)), 1)
-                                    vel_sembl = np.arange(1000, 8020, 20)
-                                    time_sembl = np.interp(vel_sembl, np_vel, np.array(time))
-                                    for i in range(len(vel_sembl)):
-                                        fnew.write('{}\t{}\t{}\n'.format(cmp, vel_sembl[i], round(time_sembl[i], 0)))
+                                flush()
                                 cmp = cmp_cur
                                 vel = [float(ls[6]), ]
                                 time = [int(ls[5]), ]
                             else:
                                 vel.append(float(ls[6]))
                                 time.append(int(ls[5]))
+                    flush()
 
                 print(curname, '->', outname)
         print('Completed!')
