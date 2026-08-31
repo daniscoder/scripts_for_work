@@ -18,8 +18,10 @@ f1 — блок строк на каждый ПВ, номер ПВ только 
 Модель: годограф приближается ломаной из четырёх прямых со свободными узлами,
 скорость каждой прямой зажата в диапазон своего слоя. Узлы ломаной и есть
 границы слоёв в удалениях — то, ради чего всё и считается. Слой берётся в
-модель, только если к его диапазону ближе хоть один кусок годографа: на коротком
-блоке слоёв выйдет меньше четырёх, лишние прямые не выдумываем.
+модель, только если к его диапазону ближе хоть один кусок годографа. Счёт
+статики требует одинакового числа слоёв на всех ПВ, поэтому слой, которого в
+данных нет, по умолчанию пишется вырожденным окном нулевой ширины (настройка
+missing: 'degenerate' | 'all' | 'skip').
 
 Скорости МНК может упереть в край диапазона — значит данные хотят быстрее или
 медленнее, чем задано. Такие ПВ считаются, но их число печатается: если их
@@ -40,7 +42,8 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, QThread, Qt, Signal, Slot
-from PySide6.QtWidgets import (QApplication, QCheckBox, QDoubleSpinBox,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
+                               QDoubleSpinBox,
                                QFileDialog, QFormLayout, QGridLayout,
                                QGroupBox, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QMessageBox, QPlainTextEdit,
@@ -82,6 +85,18 @@ class Config:
             (3, 3000.0, 4200.0),
             (4, 4400.0, 5600.0),
         ]
+
+        # Что делать со слоем, которого в данных нет (ни один кусок годографа
+        # не попадает к нему ближе, чем к соседям). Счёт статики требует
+        # одинакового числа слоёв на всех ПВ, поэтому по умолчанию слой не
+        # пропускается, а пишется вырожденным окном нулевой ширины:
+        #   'degenerate' — окно схлопнуто в границу соседних слоёв, скорость
+        #                  берётся серединой диапазона. Слоёв всегда поровну,
+        #                  и видно, что вступлений у слоя нет;
+        #   'all'        — подбор всегда ведётся всеми слоями. Окно выйдет
+        #                  ненулевым, но его границы взяты не из данных;
+        #   'skip'       — слой не пишется вовсе. Число слоёв по ПВ разное.
+        self.missing = 'degenerate'
 
         self.min_layer_width = 5.0  # слой уже этого по удалениям — в отчёт
         self.bad_rms = 10.0         # невязка модели с годографом выше — тоже
@@ -239,17 +254,43 @@ def misfit(curve: list, model: list, x_beg: float, x_end: float) -> float:
     return math.sqrt(max(total, 0.0) / math.log(x_end / x_beg))
 
 
-def used_layers(pieces: list, lays: list) -> list:
+def band_dist(lay: tuple, v: float) -> float:
+    """Насколько скорость v не дотягивает до диапазона слоя (0 — внутри)."""
+    return max(lay[1] - v, 0.0, v - lay[2])
+
+
+def used_layers(pieces: list, lays: list, missing: str) -> list:
     """Слои, к диапазону которых ближе всего хоть один кусок годографа.
 
-    Слой, за который в данных не отвечает ни один кусок, в модель не берём: без
+    Слой, за который в данных не отвечает ни один кусок, в подбор не берём: без
     этого на ПВ со скоростями 700-1800-4500 МНК втискивал третью прямую в зазор
-    между 1800 и 4500 и выдавал границу слоя, которой в данных нет."""
-    def dist(lay, v):
-        return max(lay[1] - v, 0.0, v - lay[2])
-
-    used = {min(lays, key=lambda lay: dist(lay, pc[3]))[0] for pc in pieces}
+    между 1800 и 4500 и выдавал границу слоя, которой в данных нет. В режиме
+    'all' это как раз и нужно — слои подбираются все, лишь бы их число было
+    одинаковым на всех ПВ."""
+    if missing == 'all':
+        return list(lays)
+    used = {min(lays, key=lambda lay: band_dist(lay, pc[3]))[0] for pc in pieces}
     return [lay for lay in lays if lay[0] in used]
+
+
+def pad_missing(model: list, lays: list, x_beg: float, x_end: float) -> list:
+    """Дописать недостающие слои вырожденным окном нулевой ширины.
+
+    Счёт статики требует одинакового числа слоёв на всех ПВ, а брать удаления
+    отсутствующему слою неоткуда: схлопываем его окно в границу соседей, скорость
+    берём серединой диапазона — по нулевой ширине сразу видно, что вступлений у
+    слоя нет."""
+    have = {lay[0]: lay for lay in model}
+    out = []
+    for num, lo, hi in lays:
+        if num in have:
+            out.append(have[num])
+            continue
+        after = [lay for lay in model if lay[0] > num]
+        before = [lay for lay in model if lay[0] < num]
+        x = after[0][2] if after else (before[-1][3] if before else x_beg)
+        out.append((num, (lo + hi) / 2.0, x, x))
+    return out
 
 
 def init_knots(pieces: list, lays: list, x_beg: float, x_end: float,
@@ -358,17 +399,21 @@ def fit(pieces: list, lays: list, x_beg: float, x_end: float,
 
 def build(pieces: list, cfg: Config) -> tuple:
     """(слои, СКО) для одного ПВ. Слой — (номер, V, удаление от, удаление до)."""
-    lays = used_layers(pieces, cfg.layers)
+    lays = used_layers(pieces, cfg.layers, cfg.missing)
     x_beg = max(pieces[0][0], 0.1)      # вес 1/x в невязке нуля не терпит
     x_end = min(max(pc[1] for pc in pieces), cfg.max_offset)
     if not lays or x_end - x_beg < cfg.min_layer_width:
         return [], None
     if len(lays) == 1:
-        return [(lays[0][0], pieces[0][3], x_beg, x_end)], 0.0
-    knots, vels, rms = fit(pieces, lays, x_beg, x_end, cfg.min_layer_width)
-    bounds = [x_beg] + list(knots) + [x_end]
-    return [(lays[i][0], vels[i], bounds[i], bounds[i + 1])
-            for i in range(len(lays))], rms
+        model, rms = [(lays[0][0], pieces[0][3], x_beg, x_end)], 0.0
+    else:
+        knots, vels, rms = fit(pieces, lays, x_beg, x_end, cfg.min_layer_width)
+        bounds = [x_beg] + list(knots) + [x_end]
+        model = [(lays[i][0], vels[i], bounds[i], bounds[i + 1])
+                 for i in range(len(lays))]
+    if cfg.missing == 'degenerate' and len(model) < len(cfg.layers):
+        model = pad_missing(model, cfg.layers, x_beg, x_end)
+    return model, rms
 
 
 def floor_step(v: float, step: int) -> int:
@@ -413,7 +458,7 @@ def run(cfg: Config, log=print) -> None:
     log(f'f1: ПВ {len(data)}, f2: точек {len(coords)}')
 
     rows = []           # (ПВ, X, Y, (слой, V, от, до)) — по строке на слой
-    missed, empty, pinned, thin, rough = [], [], [], [], []
+    missed, empty, pinned, thin, hollow, rough = [], [], [], [], [], []
     bands = {lay[0]: lay for lay in cfg.layers}
     for pv, pieces in data:
         xy = coords.get(pv)
@@ -429,10 +474,13 @@ def run(cfg: Config, log=print) -> None:
         for lay in model:
             num, v, x_from, x_to = lay
             band = bands[num]
-            if min(abs(v - band[1]), abs(v - band[2])) < 1.0:
-                pinned.append(pv)
-            if x_to - x_from < cfg.min_layer_width:
-                thin.append(pv)
+            if x_to - x_from <= 0.0:        # слой без вступлений, скорость
+                hollow.append(pv)           # взята серединой диапазона
+            else:
+                if min(abs(v - band[1]), abs(v - band[2])) < 1.0:
+                    pinned.append(pv)
+                if x_to - x_from < cfg.min_layer_width:
+                    thin.append(pv)
             rows.append((pv, xy[0], xy[1], lay))
 
     parent = Path(cfg.out_dir).absolute() if cfg.out_dir else path_1.parent
@@ -440,15 +488,14 @@ def run(cfg: Config, log=print) -> None:
     # окно слоя не может начинаться ближе ближнего удаления съёмки: у ПВ без
     # первого слоя модель стартует с 1 м из первой строки f1 и после округления
     # вниз давала 0
-    off_rows, below = [], []
+    off_rows = []
     for pv, x, y, lay in rows:
         if lay[0] < 2:                  # первый слой в удаления не пишем
             continue
         lo = max(floor_step(lay[2], cfg.round_step), cfg.min_offset)
         hi = max(floor_step(lay[3], cfg.round_step), cfg.min_offset)
-        if hi <= lo:
-            below.append(pv)
-            continue
+        if hi < lo:                     # окно целиком ближе ближнего удаления
+            hi = lo
         off_rows.append((pv, x, y, (lay[0], lo, hi)))
 
     path_off = parent / f'{path_1.stem}_offset.txt'
@@ -478,10 +525,10 @@ def run(cfg: Config, log=print) -> None:
         uniq = sorted(set(thin))
         log(f'Слой уже {cfg.min_layer_width:.0f} м на {len(uniq)} ПВ: '
             f'{", ".join(uniq[:20])}')
-    if below:
-        uniq = sorted(set(below))
-        log(f'Окно слоя целиком ближе {cfg.min_offset} м и в удаления не '
-            f'попало, {len(uniq)} ПВ: {", ".join(uniq[:20])}')
+    if hollow:
+        uniq = sorted(set(hollow))
+        log(f'Слоя нет в данных, вписан вырожденным окном на {len(uniq)} ПВ: '
+            f'{", ".join(uniq[:20])}{" ..." if len(uniq) > 20 else ""}')
     if rough:
         rough.sort(reverse=True)
         log(f'Невязка модели больше {cfg.bad_rms:.0f} мс на {len(rough)} ПВ, '
@@ -609,12 +656,20 @@ class Window(QWidget):
         self.sp_max = dspin(10.0, 1e6, cfg.max_offset, 100.0)
         self.sp_width = dspin(0.0, 1e4, cfg.min_layer_width, 1.0)
         self.sp_rms = dspin(0.0, 1e4, cfg.bad_rms, 1.0)
+        self.cb_missing = QComboBox()
+        for title, key in (('вырожденным окном', 'degenerate'),
+                           ('подбирать все слои', 'all'),
+                           ('пропускать', 'skip')):
+            self.cb_missing.addItem(title, key)
+        self.cb_missing.setCurrentIndex(
+            max(0, self.cb_missing.findData(cfg.missing)))
         calc = QFormLayout()
         calc.addRow('Округление удалений вниз до, м', self.sp_round)
         calc.addRow('Ближнее удаление съёмки, м', self.sp_min)
         calc.addRow('Дальнее удаление съёмки, м', self.sp_max)
         calc.addRow('Порог тонкого слоя, м', self.sp_width)
         calc.addRow('Порог большой невязки, мс', self.sp_rms)
+        calc.addRow('Слой, которого нет в данных', self.cb_missing)
         box_calc = QGroupBox('Счёт')
         box_calc.setLayout(calc)
 
@@ -741,6 +796,9 @@ class Window(QWidget):
         for key, (a, b) in self.sps_spins.items():
             a.setValue(int(s.value(key + '_lo', a.value())))
             b.setValue(int(s.value(key + '_hi', b.value())))
+        pos = self.cb_missing.findData(s.value('missing', self.cb_missing.currentData()))
+        if pos >= 0:
+            self.cb_missing.setCurrentIndex(pos)
         raw = s.value('layers', '')
         if raw:
             lays = [tuple(float(v) for v in part.split(','))
@@ -763,6 +821,7 @@ class Window(QWidget):
         for key, (a, b) in self.sps_spins.items():
             s.setValue(key + '_lo', a.value())
             s.setValue(key + '_hi', b.value())
+        s.setValue('missing', self.cb_missing.currentData())
         try:
             lays = self.get_layers()
         except ValueError:
@@ -790,6 +849,7 @@ class Window(QWidget):
         cfg.max_offset = self.sp_max.value()
         cfg.min_layer_width = self.sp_width.value()
         cfg.bad_rms = self.sp_rms.value()
+        cfg.missing = self.cb_missing.currentData()
         for key, (a, b) in self.sps_spins.items():
             setattr(cfg, key, (a.value(), b.value()))
         cfg.layers = self.get_layers()
