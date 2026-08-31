@@ -15,7 +15,7 @@ f1 — блок строк на каждый ПВ, номер ПВ только 
 конца куска совпадает с временем начала следующего. Прямая волна в данных не
 выделена, первый кусок — тоже преломлённая.
 
-Модель: годограф приближается ломаной из четырёх прямых со свободными узлами,
+Модель: годограф приближается ломаной, по прямой на слой, со свободными узлами,
 скорость каждой прямой зажата в диапазон своего слоя. Узлы ломаной и есть
 границы слоёв в удалениях — то, ради чего всё и считается. Слой берётся в
 модель, только если к его диапазону ближе хоть один кусок годографа. Счёт
@@ -74,16 +74,17 @@ class Config:
                                     # кусок обычно тянется до 1.0E7, до
                                     # бесконечности модель не считаем
 
-        # Слои модели: номер и диапазон скорости, м/с. Диапазоны не
-        # перекрываются и идут по возрастанию — на этом держится и подбор, и
-        # отбор слоёв под данные. Границы 3 и 4 слоя широкие: там скорость
-        # известна приблизительно (~3600 и ~4600), а упор в край диапазона
-        # тянет за собой и границу слоя в удалениях.
+        # Слои модели: номер и диапазон скорости, м/с. Нумерация подряд с 1,
+        # диапазоны не перекрываются и идут по возрастанию — на этом держится и
+        # подбор, и отбор слоёв под данные.
+        # Три слоя, а не четыре: по кускам годографа скорости ложатся в три
+        # сгущения — до 1200, 2000-3000 и 3200-5200, а между 2200 и 3000 у
+        # четырёхслойной раскладки был провал, куда попадала треть кусков, и
+        # второй слой упирался в потолок на двух третях ПВ.
         self.layers = [
             (1, 400.0, 1200.0),
-            (2, 1200.0, 2200.0),
-            (3, 3000.0, 4200.0),
-            (4, 4400.0, 5600.0),
+            (2, 1200.0, 3000.0),
+            (3, 3000.0, 5600.0),
         ]
 
         # Что делать со слоем, которого в данных нет (ни один кусок годографа
@@ -113,7 +114,10 @@ def check_layers(lays: list) -> str:
     теряет смысл."""
     if not lays:
         return 'Не задано ни одного слоя'
-    for num, lo, hi in lays:
+    for i, (num, lo, hi) in enumerate(lays, 1):
+        if num != i:
+            return (f'Слои нумеруются подряд с 1, а {i}-й по счёту назван {num}: '
+                    'иначе в выход уходит слой с чужим номером')
         if lo >= hi:
             return f'Слой {num}: нижняя скорость не меньше верхней'
     for a, b in zip(lays, lays[1:]):
@@ -458,8 +462,16 @@ def run(cfg: Config, log=print) -> None:
     log(f'f1: ПВ {len(data)}, f2: точек {len(coords)}')
 
     rows = []           # (ПВ, X, Y, (слой, V, от, до)) — по строке на слой
-    missed, empty, pinned, thin, hollow, rough = [], [], [], [], [], []
+    missed, empty, pinned, split, thin, hollow, rough = [], [], [], [], [], [], []
     bands = {lay[0]: lay for lay in cfg.layers}
+    # край диапазона, за которым сразу начинается соседний слой, расширять
+    # некуда: упор в него значит лишь, что скорость села на границу между
+    # слоями, и звать это узким диапазоном нельзя
+    shared = set()
+    for a, b in zip(cfg.layers, cfg.layers[1:]):
+        if abs(a[2] - b[1]) < 1e-9:
+            shared.add((a[0], 'hi'))
+            shared.add((b[0], 'lo'))
     for pv, pieces in data:
         xy = coords.get(pv)
         if xy is None:
@@ -477,8 +489,10 @@ def run(cfg: Config, log=print) -> None:
             if x_to - x_from <= 0.0:        # слой без вступлений, скорость
                 hollow.append(pv)           # взята серединой диапазона
             else:
-                if min(abs(v - band[1]), abs(v - band[2])) < 1.0:
-                    pinned.append(pv)
+                if abs(v - band[1]) < 1.0:
+                    (split if (num, 'lo') in shared else pinned).append(pv)
+                elif abs(v - band[2]) < 1.0:
+                    (split if (num, 'hi') in shared else pinned).append(pv)
                 if x_to - x_from < cfg.min_layer_width:
                     thin.append(pv)
             rows.append((pv, xy[0], xy[1], lay))
@@ -520,7 +534,13 @@ def run(cfg: Config, log=print) -> None:
     if pinned:
         uniq = sorted(set(pinned))
         log(f'Скорость упёрлась в край диапазона на {len(uniq)} ПВ — '
-            f'диапазоны стоит расширить: {", ".join(uniq[:20])}')
+            f'диапазоны стоит расширить: {", ".join(uniq[:20])}'
+            f'{" ..." if len(uniq) > 20 else ""}')
+    if split:
+        uniq = sorted(set(split))
+        log(f'Скорость села на границу между слоями на {len(uniq)} ПВ — там '
+            f'годограф не делится на два слоя однозначно: {", ".join(uniq[:20])}'
+            f'{" ..." if len(uniq) > 20 else ""}')
     if thin:
         uniq = sorted(set(thin))
         log(f'Слой уже {cfg.min_layer_width:.0f} м на {len(uniq)} ПВ: '
@@ -718,24 +738,36 @@ class Window(QWidget):
 
     # --- таблица слоёв ---------------------------------------------------
 
+    def renumber(self):
+        """Номер слоя — это его место сверху вниз, руками он не правится.
+
+        Пока номер был обычной ячейкой, удаление строки из середины оставляло
+        дыру: слои шли 1, 2, 4, и в файлы уходил слой с номером 4, хотя слоёв
+        было три."""
+        for row in range(self.tbl.rowCount()):
+            item = QTableWidgetItem(str(row + 1))
+            item.setTextAlignment(Qt.AlignCenter)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            self.tbl.setItem(row, 0, item)
+
     def set_layers(self, lays: list):
         self.tbl.setRowCount(len(lays))
         for row, (num, lo, hi) in enumerate(lays):
-            for col, val in enumerate((num, lo, hi)):
-                text = str(int(num)) if col == 0 else f'{val:.0f}'
-                item = QTableWidgetItem(text)
+            for col, val in ((1, lo), (2, hi)):
+                item = QTableWidgetItem(f'{val:.0f}')
                 item.setTextAlignment(Qt.AlignCenter)
                 self.tbl.setItem(row, col, item)
+        self.renumber()
 
     def get_layers(self) -> list:
         lays = []
         for row in range(self.tbl.rowCount()):
             vals = []
-            for col in range(3):
+            for col in (1, 2):
                 item = self.tbl.item(row, col)
                 vals.append(item.text().strip() if item else '')
             try:
-                lays.append((int(float(vals[0])), float(vals[1]), float(vals[2])))
+                lays.append((row + 1, float(vals[0]), float(vals[1])))
             except ValueError:
                 raise ValueError(f'Строка слоёв {row + 1}: не число')
         return lays
@@ -743,10 +775,11 @@ class Window(QWidget):
     def add_layer(self):
         row = self.tbl.rowCount()
         self.tbl.insertRow(row)
-        for col, val in enumerate((row + 1, 0, 0)):
-            item = QTableWidgetItem(str(val))
+        for col in (1, 2):
+            item = QTableWidgetItem('0')
             item.setTextAlignment(Qt.AlignCenter)
             self.tbl.setItem(row, col, item)
+        self.renumber()
 
     def del_layer(self):
         row = self.tbl.currentRow()
@@ -754,6 +787,7 @@ class Window(QWidget):
             row = self.tbl.rowCount() - 1
         if row >= 0:
             self.tbl.removeRow(row)
+            self.renumber()
 
     # --- выбор файлов ----------------------------------------------------
 
