@@ -19,17 +19,26 @@ f1 — блок строк на каждый ПВ, номер ПВ только 
 двух способов (настройка method):
     'lsq'       годограф приближается ломаной, по прямой на слой, со свободными
                 узлами, скорость каждой прямой зажата в диапазон своего слоя.
-                Узлы ломаной и есть границы. Учитываются и времена, и скорости;
+                Узлы ломаной и есть границы; учитываются и времена, и скорости;
     'threshold' граница там, где кажущаяся скорость пересекает порог между
-                диапазонами соседних слоёв, с интерполяцией между серединами
-                кусков. Времена не участвуют вовсе, скорость слоя считается
-                потом МНК по его окну и в диапазон не зажимается. Слой берётся в
-модель, только если к его диапазону ближе хоть один кусок годографа. Счёт
-статики требует одинакового числа слоёв на всех ПВ, поэтому слой, которого в
-данных нет, по умолчанию пишется вырожденным окном нулевой ширины (настройка
-missing: 'degenerate' | 'all' | 'skip').
+                диапазонами соседних слоёв, с интерполяцией внутри перехода.
+                Времена не участвуют вовсе.
+Скорость слоя в обоих способах считается МНК по его собственному окну и в
+диапазон не зажимается: окно уже определено, и подгонять под него ещё и скорость
+значило бы врать в отчёте. Выход скорости за диапазон пишется в отчёт — это
+признак, что граница проведена не там.
 
-Скорости МНК может упереть в край диапазона — значит данные хотят быстрее или
+Оба способа обязаны отдать кусок годографа тому слою, в чей диапазон попадает
+его скорость: в окно второго слоя не должны попадать удаления, где в первых
+вступлениях ещё первый слой. Свобода у границы остаётся только внутри кусков,
+скорость которых лежит в зазоре между диапазонами и не принадлежит никому.
+
+Слой берётся в модель, только если к его диапазону ближе хоть один кусок
+годографа. Счёт статики требует одинакового числа слоёв на всех ПВ, поэтому
+слой, которого в данных нет, по умолчанию пишется вырожденным окном нулевой
+ширины (настройка missing: 'degenerate' | 'all' | 'skip').
+
+Скорость может упереться в край диапазона — значит данные хотят быстрее или
 медленнее, чем задано. Такие ПВ считаются, но их число печатается: если их
 много, диапазон надо расширить, иначе границы слоёв смещены.
 
@@ -96,13 +105,14 @@ class Config:
         #   'lsq'       — годограф приближается ломаной, по прямой на слой, узлы
         #                 свободны, скорость каждой зажата в диапазон своего
         #                 слоя. Границы выходят из наилучшего приближения всего
-        #                 годографа сразу;
+        #                 годографа сразу, в счёт идут и времена, и скорости;
         #   'threshold' — граница там, где кажущаяся скорость пересекает порог
         #                 между диапазонами соседних слоёв, с интерполяцией
-        #                 между серединами кусков. Границу задают только сами
-        #                 скорости кусков, времена в неё не входят; скорость
-        #                 слоя считается потом МНК по его окну и в диапазон не
-        #                 зажимается.
+        #                 внутри перехода. Времена не участвуют вовсе.
+        # Кусок годографа в любом случае достаётся слою, в чей диапазон попала
+        # его скорость (knot_limits), поэтому при смежных диапазонах способы
+        # дают одни и те же границы — разойтись им есть где только в зазорах
+        # между диапазонами.
         self.method = 'lsq'
 
         # Что делать со слоем, которого в данных нет (ни один кусок годографа
@@ -350,6 +360,69 @@ def order_knots(knots: list, x_beg: float, x_end: float,
     return out
 
 
+knot_eps = 1e-3     # чтобы схлопнувшийся слой не делил на ноль
+
+
+def knot_limits(pieces: list, lays: list, x_beg: float,
+                x_end: float) -> list:
+    """Коридор [от, до] для каждой границы слоёв.
+
+    Кусок годографа, скорость которого лежит внутри диапазона слоя, достаётся
+    этому слою целиком. Иначе в окно второго слоя попадают удаления, где в
+    первых вступлениях ещё первый слой, и пикировка по такому окну соберёт не ту
+    волну. Куски со скоростью в зазоре между диапазонами не принадлежат никому —
+    внутри них граница и ставится, там же работает интерполяция.
+
+    При смежных диапазонах (2200 — потолок второго слоя и низ третьего) зазоров
+    нет, и коридор схлопывается до стыка кусков: граница встаёт ровно туда, где
+    скорость перешла порог."""
+    owned = []
+    for x1, x2, t0, v in pieces:
+        num = None
+        for lay in lays:
+            if lay[1] <= v <= lay[2]:
+                num = lay[0]
+                break
+        owned.append((max(x1, x_beg), min(x2, x_end), num))
+
+    limits = []
+    for i in range(len(lays) - 1):
+        a, b = x_beg, x_end
+        for x1, x2, num in owned:
+            if num is None or x2 <= x1:
+                continue
+            if num <= lays[i][0]:
+                a = max(a, x2)
+            elif num >= lays[i + 1][0]:
+                b = min(b, x1)
+        limits.append((a, b))
+
+    out = []                        # по возрастанию и без нулевой ширины слоя
+    prev = x_beg
+    for i, (a, b) in enumerate(limits):
+        far = x_end - knot_eps * (len(limits) - i)
+        a = min(max(a, prev + knot_eps), far)
+        b = min(max(b, a), far)
+        out.append((a, b))
+        prev = a
+    return out
+
+
+def clamp_knots(knots: list, limits: list, x_end: float) -> list:
+    """Границы внутрь коридоров и строго по возрастанию.
+
+    Коридоры соседних границ могут наложиться, если у слоя между ними нет своих
+    кусков, — тогда порядок важнее коридора, иначе слой выйдет отрицательной
+    ширины."""
+    out = []
+    for k, (a, b) in zip(knots, limits):
+        k = min(max(k, a), b)
+        if out:
+            k = max(k, out[-1] + knot_eps)
+        out.append(min(k, x_end - knot_eps))
+    return out
+
+
 def line_fit(curve: list, a: float, b: float) -> tuple:
     """МНК-прямая t = A + B*x по куску годографа [a, b], вес 1/x — тот же, что
     в misfit. Интегралы берём точно по изломам годографа, без дискретизации."""
@@ -364,6 +437,21 @@ def line_fit(curve: list, a: float, b: float) -> tuple:
     if abs(det) < 1e-12:
         return 0.0, s1 / max(s2, 1e-12)
     return (r0 * s2 - r1 * s1) / det, (s0 * r1 - s1 * r0) / det
+
+
+def window_vels(curve: list, bounds: list) -> tuple:
+    """Скорости слоёв по их собственным окнам: (скорости, прямые).
+
+    Скорость слоя считается МНК по его окну, а не берётся из общей ломаной.
+    Границы заданы данными и подбору не подчиняются, поэтому ломаная, вытягивая
+    общую невязку, перекашивала скорости: на проверке второй слой выходил
+    1299 м/с там, где кусок годографа даёт 2104."""
+    lines, vels = [], []
+    for a, b in zip(bounds, bounds[1:]):
+        ca, cb = line_fit(curve, a, b)
+        lines.append((b, ca, cb))
+        vels.append(1000.0 / cb if cb > 1e-9 else 0.0)
+    return vels, lines
 
 
 def threshold_x(pieces: list, thr: float, x_beg: float, x_end: float) -> float:
@@ -392,7 +480,7 @@ def threshold_x(pieces: list, thr: float, x_beg: float, x_end: float) -> float:
 
 
 def fit_threshold(pieces: list, lays: list, x_beg: float, x_end: float,
-                  min_width: float) -> tuple:
+                  min_width: float, limits: list) -> tuple:
     """Границы по порогам скорости. Возвращает (границы, скорости, СКО).
 
     Порог между соседними слоями — середина зазора между их диапазонами (для
@@ -401,14 +489,9 @@ def fit_threshold(pieces: list, lays: list, x_beg: float, x_end: float,
     под него ещё и скорость значило бы врать в отчёте."""
     knots = [threshold_x(pieces, (lays[i][2] + lays[i + 1][1]) / 2.0, x_beg, x_end)
              for i in range(len(lays) - 1)]
-    knots = order_knots(knots, x_beg, x_end, min_width)
+    knots = clamp_knots(knots, limits, x_end)
     curve = curve_lines(pieces)
-    bounds = [x_beg] + knots + [x_end]
-    lines, vels = [], []
-    for i in range(len(lays)):
-        a, b = line_fit(curve, bounds[i], bounds[i + 1])
-        lines.append((bounds[i + 1], a, b))
-        vels.append(1000.0 / b if b > 1e-9 else lays[i][2])
+    vels, lines = window_vels(curve, [x_beg] + knots + [x_end])
     return knots, vels, misfit(curve, lines, x_beg, x_end)
 
 
@@ -424,7 +507,12 @@ def moves(p: list, k: int, s: float, n: int, lines: list) -> list:
         q = list(p)
         q[k] += d
         out.append(q)
-        if k > n:                           # k — граница слоя, узел k-n
+        if k <= n:                          # k — время в узле
+            q2 = list(p)                    # сдвиг хвоста: время узла и всех
+            for j in range(k, n + 1):       # следующих. Меняет скорость ровно
+                q2[j] += d                  # одного слоя, тогда как одиночный
+            out.append(q2)                  # сдвиг узла ломает сразу два
+        else:                               # k — граница слоя, узел k-n
             j = k - n - 1
             for b in (lines[j][2], lines[j + 1][2]):
                 q2 = list(p)
@@ -435,15 +523,17 @@ def moves(p: list, k: int, s: float, n: int, lines: list) -> list:
 
 
 def fit(pieces: list, lays: list, x_beg: float, x_end: float,
-        min_width: float) -> tuple:
+        min_width: float, limits: list) -> tuple:
     """Подбор ломаной покоординатным спуском. Возвращает (границы, скорости, СКО).
 
     Параметры МНК: времена в узлах и удаления границ слоёв. Скорость каждой
-    прямой зажата в диапазон своего слоя, границы — в [x_beg, x_end] и строго по
-    возрастанию."""
+    прямой зажата в диапазон своего слоя, границы — в свои коридоры (limits) и
+    строго по возрастанию. Ломаная нужна только чтобы поставить границы; сами
+    скорости считаются потом по окнам, см. window_vels."""
     n = len(lays)
     curve = curve_lines(pieces)
-    knots = init_knots(pieces, lays, x_beg, x_end, min_width)
+    knots = clamp_knots(init_knots(pieces, lays, x_beg, x_end, min_width),
+                        limits, x_end)
     xs = [x_beg] + knots + [x_end]
 
     # старт: ведём время по годографу, но шаг между узлами зажимаем в диапазон
@@ -462,6 +552,9 @@ def fit(pieces: list, lays: list, x_beg: float, x_end: float,
 
     def feasible(q):
         xq = node_x(q, n, x_beg, x_end)
+        for i, (a, b) in enumerate(limits):
+            if not a <= xq[i + 1] <= b:
+                return False
         for i in range(n):
             if xq[i + 1] - xq[i] <= 0.0 or q[i + 1] - q[i] <= 0.0:
                 return False
@@ -486,9 +579,9 @@ def fit(pieces: list, lays: list, x_beg: float, x_end: float,
             step = [s / 2.0 for s in step]
             if max(step) < 1e-4:
                 break
-    xs = node_x(p, n, x_beg, x_end)
-    vels = [1000.0 * (xs[i + 1] - xs[i]) / (p[i + 1] - p[i]) for i in range(n)]
-    return list(p[n + 1:]), vels, best
+    knots = list(p[n + 1:])
+    vels, lines = window_vels(curve, [x_beg] + knots + [x_end])
+    return knots, vels, misfit(curve, lines, x_beg, x_end)
 
 
 def build(pieces: list, cfg: Config) -> tuple:
@@ -502,7 +595,9 @@ def build(pieces: list, cfg: Config) -> tuple:
         model, rms = [(lays[0][0], pieces[0][3], x_beg, x_end)], 0.0
     else:
         method = fit_threshold if cfg.method == 'threshold' else fit
-        knots, vels, rms = method(pieces, lays, x_beg, x_end, cfg.min_layer_width)
+        limits = knot_limits(pieces, lays, x_beg, x_end)
+        knots, vels, rms = method(pieces, lays, x_beg, x_end,
+                                  cfg.min_layer_width, limits)
         bounds = [x_beg] + list(knots) + [x_end]
         model = [(lays[i][0], vels[i], bounds[i], bounds[i + 1])
                  for i in range(len(lays))]
