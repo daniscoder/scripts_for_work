@@ -6,6 +6,9 @@
 слоёв в удалениях, для расчёта статики по первым вступлениям) и
 <f1>_speed.txt (скорости слоёв).
 
+Настройки задаются в окне (PySide6), значения по умолчанию — в Config. Счёт от
+интерфейса отделён: run(cfg, log) работает и без Qt, если импортировать модуль.
+
 f1 — блок строк на каждый ПВ, номер ПВ только в первой строке блока:
     <ПВ> <мин.удаление> <макс.удаление> <интерсепт, мс> <скорость, м/с>
 Строки блока — куски ОДНОГО непрерывного годографа первых вступлений: время
@@ -13,14 +16,14 @@ f1 — блок строк на каждый ПВ, номер ПВ только 
 выделена, первый кусок — тоже преломлённая.
 
 Модель: годограф приближается ломаной из четырёх прямых со свободными узлами,
-скорость каждой прямой зажата в диапазон своего слоя (layers). Узлы ломаной и
-есть границы слоёв в удалениях — то, ради чего всё и считается. Слой берётся в
-модель, только если его диапазон скоростей пересекается с наблюдённым: на
-коротком блоке слоёв выйдет меньше четырёх, лишние прямые не выдумываем.
+скорость каждой прямой зажата в диапазон своего слоя. Узлы ломаной и есть
+границы слоёв в удалениях — то, ради чего всё и считается. Слой берётся в
+модель, только если к его диапазону ближе хоть один кусок годографа: на коротком
+блоке слоёв выйдет меньше четырёх, лишние прямые не выдумываем.
 
 Скорости МНК может упереть в край диапазона — значит данные хотят быстрее или
-медленнее, чем задано в layers. Такие ПВ считаются, но их число печатается:
-если их много, диапазон надо расширить, иначе границы слоёв смещены.
+медленнее, чем задано. Такие ПВ считаются, но их число печатается: если их
+много, диапазон надо расширить, иначе границы слоёв смещены.
 
 f2 — SPS с фиксированными позициями (нумерация с 1, границы включительно):
     2-17  линия ПВ, 18-25 точка ПВ (склеиваем без пробелов -> номер ПВ),
@@ -33,38 +36,71 @@ f2 — SPS с фиксированными позициями (нумераци�
 """
 
 import math
+import sys
 from pathlib import Path
 
-f1_path = r"d:\Processing\2026_Юкола-нефть\stat\refractionLayers\LMO_tabmashinskiy_2025.txt"
-f2_path = r"d:\Processing\2026_Юкола-нефть\Тамбашинский\mesa\sps\tambashinskiy_2025.sps"
-out_dir = r""           # пусто — класть рядом с f1
+from PySide6.QtCore import QObject, QSettings, QThread, Qt, Signal, Slot
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDoubleSpinBox,
+                               QFileDialog, QFormLayout, QGridLayout,
+                               QGroupBox, QHBoxLayout, QHeaderView, QLabel,
+                               QLineEdit, QMessageBox, QPlainTextEdit,
+                               QPushButton, QSpinBox, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
-pv_col = 0              # колонка номера ПВ в f1
-x1_col, x2_col = 1, 2   # мин./макс. удаление куска годографа
-t0_col, v_col = 3, 4    # интерсепт (мс) и скорость (м/с) куска
 
-round_step = 10         # шаг округления удалений (вниз)
-max_offset = 3000.0     # дальнее удаление съёмки: в f1 последний кусок обычно
-                        # тянется до 1.0E7, до бесконечности модель не считаем
+class Config:
+    """Все настройки счёта в одном месте: то же самое правится в окне."""
 
-# Слои модели: номер и диапазон скорости, м/с. Диапазоны не пересекаются и идут
-# по возрастанию — на этом держится и подбор, и отбор слоёв под данные. Границы
-# 3 и 4 слоя широкие: там скорость известна приблизительно (~3600 и ~4600), а
-# упор в край диапазона тянет за собой и границу слоя в удалениях.
-layers = (
-    (1, 400.0, 1000.0),
-    (2, 1400.0, 2200.0),
-    (3, 3000.0, 4200.0),
-    (4, 4400.0, 5600.0),
-)
+    def __init__(self):
+        self.f1_path = r"d:\Processing\2026_Юкола-нефть\stat\refractionLayers\LMO_tabmashinskiy_2025.txt"
+        self.f2_path = r"d:\Processing\2026_Юкола-нефть\Тамбашинский\mesa\sps\tambashinskiy_2025.sps"
+        self.out_dir = r""          # пусто — класть рядом с f1
 
-min_layer_width = 5.0   # слой уже этого по удалениям — повод для предупреждения
-bad_rms = 10.0          # невязка модели с годографом выше — тоже
+        self.pv_col = 0             # колонка номера ПВ в f1
+        self.x1_col = 1             # мин. удаление куска годографа
+        self.x2_col = 2             # макс. удаление
+        self.t0_col = 3             # интерсепт, мс
+        self.v_col = 4              # скорость, м/с
 
-sps_line_pos = (2, 17)  # позиции линии ПВ в SPS (с 1, включительно)
-sps_point_pos = (18, 25)
-sps_x_pos = (47, 55)
-sps_y_pos = (56, 65)
+        self.round_step = 10        # шаг округления удалений (вниз)
+        self.max_offset = 3000.0    # дальнее удаление съёмки: в f1 последний
+                                    # кусок обычно тянется до 1.0E7, до
+                                    # бесконечности модель не считаем
+
+        # Слои модели: номер и диапазон скорости, м/с. Диапазоны не
+        # перекрываются и идут по возрастанию — на этом держится и подбор, и
+        # отбор слоёв под данные. Границы 3 и 4 слоя широкие: там скорость
+        # известна приблизительно (~3600 и ~4600), а упор в край диапазона
+        # тянет за собой и границу слоя в удалениях.
+        self.layers = [
+            (1, 400.0, 1200.0),
+            (2, 1200.0, 2200.0),
+            (3, 3000.0, 4200.0),
+            (4, 4400.0, 5600.0),
+        ]
+
+        self.min_layer_width = 5.0  # слой уже этого по удалениям — в отчёт
+        self.bad_rms = 10.0         # невязка модели с годографом выше — тоже
+
+        self.sps_line_pos = (2, 17)     # позиции линии ПВ в SPS (с 1, вкл.)
+        self.sps_point_pos = (18, 25)
+        self.sps_x_pos = (47, 55)
+        self.sps_y_pos = (56, 65)
+
+
+def check_layers(lays: list) -> str:
+    """Текст ошибки или пустая строка. Диапазоны должны идти по возрастанию и не
+    перекрываться: иначе кусок годографа достаётся сразу двум слоям и подбор
+    теряет смысл."""
+    if not lays:
+        return 'Не задано ни одного слоя'
+    for num, lo, hi in lays:
+        if lo >= hi:
+            return f'Слой {num}: нижняя скорость не меньше верхней'
+    for a, b in zip(lays, lays[1:]):
+        if a[2] > b[1]:
+            return f'Слои {a[0]} и {b[0]}: диапазоны скоростей перекрываются'
+    return ''
 
 
 def field(s: str, pos: tuple) -> str:
@@ -81,21 +117,22 @@ def norm_num(s: str) -> str:
     return s
 
 
-def read_f1(path: Path) -> list:
+def read_f1(path: Path, cfg: Config, log) -> list:
     """[(номер ПВ, [(x1, x2, t0, V), ...])] — блок кусков годографа на ПВ."""
     result = []
     seen = set()
-    need_cols = max(x1_col, x2_col, t0_col, v_col)
+    cols = (cfg.x1_col, cfg.x2_col, cfg.t0_col, cfg.v_col)
+    need_cols = max(cols)
     cur = None
     with open(path, 'r') as f:
         for num, s in enumerate(f, 1):
             ls = s.rstrip('\n').rstrip('\r').split('\t')
             if len(ls) <= need_cols:
                 continue
-            pv = norm_num(ls[pv_col])
+            pv = norm_num(ls[cfg.pv_col])
             if pv:                          # первая строка блока
                 if pv in seen:
-                    print(f'f1, строка {num}: ПВ {pv} уже был — блок пропущен')
+                    log(f'f1, строка {num}: ПВ {pv} уже был — блок пропущен')
                     cur = None
                     continue
                 seen.add(pv)
@@ -104,19 +141,18 @@ def read_f1(path: Path) -> list:
             if cur is None:                 # хвост от пропущенного блока
                 continue
             try:
-                piece = (float(ls[x1_col]), float(ls[x2_col]),
-                         float(ls[t0_col]), float(ls[v_col]))
+                piece = tuple(float(ls[c]) for c in cols)
             except ValueError:
-                print(f'f1, строка {num}: не число в нужной колонке — пропуск')
+                log(f'f1, строка {num}: не число в нужной колонке — пропуск')
                 continue
             if piece[1] <= piece[0] or piece[3] <= 0:
-                print(f'f1, строка {num}: удаления или скорость не годятся — пропуск')
+                log(f'f1, строка {num}: удаления или скорость не годятся — пропуск')
                 continue
             cur.append(piece)
     return [(pv, sorted(pieces)) for pv, pieces in result if pieces]
 
 
-def read_f2(path: Path) -> dict:
+def read_f2(path: Path, cfg: Config, log) -> dict:
     """{номер ПВ: (X, Y)}"""
     result = {}
     with open(path, 'r') as f:
@@ -124,15 +160,16 @@ def read_f2(path: Path) -> dict:
             s = s.rstrip('\n').rstrip('\r')
             if not s.strip() or s[0] in ('H', 'h'):
                 continue
-            if len(s) < sps_y_pos[1]:
-                print(f'f2, строка {num}: короче {sps_y_pos[1]} символов — пропуск')
+            if len(s) < cfg.sps_y_pos[1]:
+                log(f'f2, строка {num}: короче {cfg.sps_y_pos[1]} символов — пропуск')
                 continue
-            pv = norm_num(field(s, sps_line_pos)) + norm_num(field(s, sps_point_pos))
+            pv = (norm_num(field(s, cfg.sps_line_pos))
+                  + norm_num(field(s, cfg.sps_point_pos)))
             try:
-                x = float(field(s, sps_x_pos))
-                y = float(field(s, sps_y_pos))
+                x = float(field(s, cfg.sps_x_pos))
+                y = float(field(s, cfg.sps_y_pos))
             except ValueError:
-                print(f'f2, строка {num}: не читаются координаты — пропуск')
+                log(f'f2, строка {num}: не читаются координаты — пропуск')
                 continue
             if pv not in result:
                 result[pv] = (x, y)
@@ -198,7 +235,7 @@ def misfit(curve: list, model: list, x_beg: float, x_end: float) -> float:
     return math.sqrt(max(total, 0.0) / math.log(x_end / x_beg))
 
 
-def used_layers(pieces: list) -> list:
+def used_layers(pieces: list, lays: list) -> list:
     """Слои, к диапазону которых ближе всего хоть один кусок годографа.
 
     Слой, за который в данных не отвечает ни один кусок, в модель не берём: без
@@ -207,11 +244,12 @@ def used_layers(pieces: list) -> list:
     def dist(lay, v):
         return max(lay[1] - v, 0.0, v - lay[2])
 
-    used = {min(layers, key=lambda lay: dist(lay, pc[3]))[0] for pc in pieces}
-    return [lay for lay in layers if lay[0] in used]
+    used = {min(lays, key=lambda lay: dist(lay, pc[3]))[0] for pc in pieces}
+    return [lay for lay in lays if lay[0] in used]
 
 
-def init_knots(pieces: list, lays: list, x_beg: float, x_end: float) -> list:
+def init_knots(pieces: list, lays: list, x_beg: float, x_end: float,
+               min_width: float) -> list:
     """Стартовые узлы: там, где кажущаяся скорость впервые дотягивает до порога
     между диапазонами соседних слоёв."""
     knots = []
@@ -226,7 +264,7 @@ def init_knots(pieces: list, lays: list, x_beg: float, x_end: float) -> list:
     # зазор нужен только чтобы узлы не слиплись: разносить их равномерно по
     # всему диапазону нельзя — спуск потом не вытащит первый узел с сотен метров
     n = len(knots)
-    gap = min(min_layer_width, (x_end - x_beg) / (2.0 * (n + 1)))
+    gap = min(min_width, (x_end - x_beg) / (2.0 * (n + 1)))
     for i in range(n):                      # строго по возрастанию, с зазором
         lo = x_beg + gap * (i + 1)
         if i:
@@ -257,7 +295,8 @@ def moves(p: list, k: int, s: float, n: int, lines: list) -> list:
     return out
 
 
-def fit(pieces: list, lays: list, x_beg: float, x_end: float) -> tuple:
+def fit(pieces: list, lays: list, x_beg: float, x_end: float,
+        min_width: float) -> tuple:
     """Подбор ломаной покоординатным спуском. Возвращает (границы, скорости, СКО).
 
     Параметры МНК: времена в узлах и удаления границ слоёв. Скорость каждой
@@ -265,7 +304,7 @@ def fit(pieces: list, lays: list, x_beg: float, x_end: float) -> tuple:
     возрастанию."""
     n = len(lays)
     curve = curve_lines(pieces)
-    knots = init_knots(pieces, lays, x_beg, x_end)
+    knots = init_knots(pieces, lays, x_beg, x_end, min_width)
     xs = [x_beg] + knots + [x_end]
 
     # старт: ведём время по годографу, но шаг между узлами зажимаем в диапазон
@@ -313,30 +352,31 @@ def fit(pieces: list, lays: list, x_beg: float, x_end: float) -> tuple:
     return list(p[n + 1:]), vels, best
 
 
-def build(pieces: list) -> tuple:
+def build(pieces: list, cfg: Config) -> tuple:
     """(слои, СКО) для одного ПВ. Слой — (номер, V, удаление от, удаление до)."""
-    lays = used_layers(pieces)
+    lays = used_layers(pieces, cfg.layers)
     x_beg = max(pieces[0][0], 0.1)      # вес 1/x в невязке нуля не терпит
-    x_end = min(max(pc[1] for pc in pieces), max_offset)
-    if not lays or x_end - x_beg < min_layer_width:
+    x_end = min(max(pc[1] for pc in pieces), cfg.max_offset)
+    if not lays or x_end - x_beg < cfg.min_layer_width:
         return [], None
     if len(lays) == 1:
         return [(lays[0][0], pieces[0][3], x_beg, x_end)], 0.0
-    knots, vels, rms = fit(pieces, lays, x_beg, x_end)
+    knots, vels, rms = fit(pieces, lays, x_beg, x_end, cfg.min_layer_width)
     bounds = [x_beg] + list(knots) + [x_end]
     return [(lays[i][0], vels[i], bounds[i], bounds[i + 1])
             for i in range(len(lays))], rms
 
 
-def floor_step(v: float) -> int:
-    return int(math.floor(v / round_step)) * round_step
+def floor_step(v: float, step: int) -> int:
+    return int(math.floor(v / step)) * step
 
 
-def write_blocks(path: Path, rows: list, first_layer: int, fmt) -> int:
+def write_blocks(path: Path, rows: list, first_layer: int, fmt,
+                 lays: list) -> int:
     """Блок на слой, номер слоя только в первой строке своего блока."""
     written = 0
     with open(path, 'w') as f:
-        for lay_def in layers:
+        for lay_def in lays:
             num = lay_def[0]
             if num < first_layer:
                 continue
@@ -350,73 +390,428 @@ def write_blocks(path: Path, rows: list, first_layer: int, fmt) -> int:
     return written
 
 
-def main():
-    path_1 = Path(f1_path).absolute()
-    path_2 = Path(f2_path).absolute()
+def run(cfg: Config, log=print) -> None:
+    """Весь счёт: прочитать, построить модели, записать оба файла."""
+    err = check_layers(cfg.layers)
+    if err:
+        log(err)
+        return
 
+    path_1 = Path(cfg.f1_path).absolute()
+    path_2 = Path(cfg.f2_path).absolute()
     for p in (path_1, path_2):
         if not p.exists():
-            print(f'Нет файла: {p}')
+            log(f'Нет файла: {p}')
             return
 
-    data = read_f1(path_1)
-    coords = read_f2(path_2)
-    print(f'f1: ПВ {len(data)}, f2: точек {len(coords)}')
+    data = read_f1(path_1, cfg, log)
+    coords = read_f2(path_2, cfg, log)
+    log(f'f1: ПВ {len(data)}, f2: точек {len(coords)}')
 
     rows = []           # (ПВ, X, Y, (слой, V, от, до)) — по строке на слой
     missed, empty, pinned, thin, rough = [], [], [], [], []
+    bands = {lay[0]: lay for lay in cfg.layers}
     for pv, pieces in data:
         xy = coords.get(pv)
         if xy is None:
             missed.append(pv)
             continue
-        model, rms = build(pieces)
+        model, rms = build(pieces, cfg)
         if not model:
             empty.append(pv)
             continue
-        if rms is not None and rms > bad_rms:
+        if rms is not None and rms > cfg.bad_rms:
             rough.append((rms, pv))
         for lay in model:
             num, v, x_from, x_to = lay
-            band = layers[num - 1]
+            band = bands[num]
             if min(abs(v - band[1]), abs(v - band[2])) < 1.0:
                 pinned.append(pv)
-            if x_to - x_from < min_layer_width:
+            if x_to - x_from < cfg.min_layer_width:
                 thin.append(pv)
             rows.append((pv, xy[0], xy[1], lay))
 
-    parent = Path(out_dir).absolute() if out_dir else path_1.parent
+    parent = Path(cfg.out_dir).absolute() if cfg.out_dir else path_1.parent
 
     path_off = parent / f'{path_1.stem}_offset.txt'
     n_off = write_blocks(
         path_off, rows, 2,
         lambda x, y, lay: '{:.1f}\t{:.1f}\t{}\t{}'.format(
-            x, y, floor_step(lay[2]), floor_step(lay[3])))
-    print(f'удаления: записано {n_off} строк -> {path_off}')
+            x, y, floor_step(lay[2], cfg.round_step),
+            floor_step(lay[3], cfg.round_step)),
+        cfg.layers)
+    log(f'удаления: записано {n_off} строк -> {path_off}')
 
     path_spd = parent / f'{path_1.stem}_speed.txt'
     n_spd = write_blocks(
         path_spd, rows, 1,
-        lambda x, y, lay: '{:.1f}\t{:.1f}\t{:.1f}'.format(x, y, lay[1]))
-    print(f'скорости: записано {n_spd} строк -> {path_spd}')
+        lambda x, y, lay: '{:.1f}\t{:.1f}\t{:.1f}'.format(x, y, lay[1]),
+        cfg.layers)
+    log(f'скорости: записано {n_spd} строк -> {path_spd}')
 
     if missed:
-        print(f'Нет координат для {len(missed)} ПВ: {", ".join(missed[:20])}'
-              f'{" ..." if len(missed) > 20 else ""}')
+        log(f'Нет координат для {len(missed)} ПВ: {", ".join(missed[:20])}'
+            f'{" ..." if len(missed) > 20 else ""}')
     if empty:
-        print(f'Не из чего строить модель, {len(empty)} ПВ: {", ".join(empty[:20])}')
+        log(f'Не из чего строить модель, {len(empty)} ПВ: {", ".join(empty[:20])}')
     if pinned:
         uniq = sorted(set(pinned))
-        print(f'Скорость упёрлась в край диапазона на {len(uniq)} ПВ — '
-              f'диапазоны в layers стоит расширить: {", ".join(uniq[:20])}')
+        log(f'Скорость упёрлась в край диапазона на {len(uniq)} ПВ — '
+            f'диапазоны стоит расширить: {", ".join(uniq[:20])}')
     if thin:
         uniq = sorted(set(thin))
-        print(f'Слой уже {min_layer_width:.0f} м на {len(uniq)} ПВ: '
-              f'{", ".join(uniq[:20])}')
+        log(f'Слой уже {cfg.min_layer_width:.0f} м на {len(uniq)} ПВ: '
+            f'{", ".join(uniq[:20])}')
     if rough:
         rough.sort(reverse=True)
-        print(f'Невязка модели больше {bad_rms:.0f} мс на {len(rough)} ПВ, худшие: '
-              + ', '.join(f'{pv} ({r:.1f} мс)' for r, pv in rough[:10]))
+        log(f'Невязка модели больше {cfg.bad_rms:.0f} мс на {len(rough)} ПВ, '
+            'худшие: ' + ', '.join(f'{pv} ({r:.1f} мс)' for r, pv in rough[:10]))
+
+
+class Worker(QObject):
+    """Счёт в отдельном потоке: на реальном массиве это минуты, в главном потоке
+    окно бы всё это время висело."""
+
+    message = Signal(str)
+    finished = Signal()
+
+    def __init__(self, cfg: Config):
+        super().__init__()
+        self.cfg = cfg
+
+    @Slot()
+    def work(self):
+        try:
+            run(self.cfg, self.message.emit)
+        except Exception as e:
+            self.message.emit(f'Сорвалось: {e.__class__.__name__}: {e}')
+        self.finished.emit()
+
+
+def spin(lo: int, hi: int, value: int) -> QSpinBox:
+    box = QSpinBox()
+    box.setRange(lo, hi)
+    box.setValue(value)
+    return box
+
+
+def dspin(lo: float, hi: float, value: float, step: float, dec: int = 1):
+    box = QDoubleSpinBox()
+    box.setRange(lo, hi)
+    box.setDecimals(dec)
+    box.setSingleStep(step)
+    box.setValue(value)
+    return box
+
+
+class Window(QWidget):
+    """Окно настроек. Значения по умолчанию — из Config, между запусками
+    сохраняются в QSettings: пути к рабочим дискам длинные, набирать их заново
+    на каждой партии незачем."""
+
+    def __init__(self):
+        super().__init__()
+        self.cfg = Config()
+        self.thread = None
+        self.worker = None
+        self.build_ui()
+        self.load_settings()
+
+    # --- сборка окна -----------------------------------------------------
+
+    def build_ui(self):
+        cfg = self.cfg
+        self.setWindowTitle('LMO -> модель ВЧР: удаления и скорости слоёв')
+
+        self.ed_f1 = QLineEdit(cfg.f1_path)
+        self.ed_f2 = QLineEdit(cfg.f2_path)
+        self.ed_out = QLineEdit(cfg.out_dir)
+        self.ed_out.setPlaceholderText('пусто — класть рядом с файлом LMO')
+
+        files = QFormLayout()
+        files.addRow('Файл LMO', self.with_browse(self.ed_f1, self.pick_f1))
+        files.addRow('Файл SPS', self.with_browse(self.ed_f2, self.pick_f2))
+        files.addRow('Каталог вывода', self.with_browse(self.ed_out, self.pick_out))
+        box_files = QGroupBox('Файлы')
+        box_files.setLayout(files)
+
+        self.sp_pv = spin(0, 50, cfg.pv_col)
+        self.sp_x1 = spin(0, 50, cfg.x1_col)
+        self.sp_x2 = spin(0, 50, cfg.x2_col)
+        self.sp_t0 = spin(0, 50, cfg.t0_col)
+        self.sp_v = spin(0, 50, cfg.v_col)
+        cols = QFormLayout()
+        cols.addRow('Номер ПВ', self.sp_pv)
+        cols.addRow('Мин. удаление', self.sp_x1)
+        cols.addRow('Макс. удаление', self.sp_x2)
+        cols.addRow('Интерсепт, мс', self.sp_t0)
+        cols.addRow('Скорость, м/с', self.sp_v)
+        box_cols = QGroupBox('Колонки в файле LMO (с нуля)')
+        box_cols.setLayout(cols)
+
+        self.sps_spins = {}
+        grid = QGridLayout()
+        grid.addWidget(QLabel('с'), 0, 1)
+        grid.addWidget(QLabel('по'), 0, 2)
+        for row, (key, title) in enumerate(
+                (('sps_line_pos', 'Линия ПВ'), ('sps_point_pos', 'Точка ПВ'),
+                 ('sps_x_pos', 'X'), ('sps_y_pos', 'Y')), start=1):
+            lo, hi = getattr(cfg, key)
+            a, b = spin(1, 500, lo), spin(1, 500, hi)
+            self.sps_spins[key] = (a, b)
+            grid.addWidget(QLabel(title), row, 0)
+            grid.addWidget(a, row, 1)
+            grid.addWidget(b, row, 2)
+        box_sps = QGroupBox('Позиции в SPS (с единицы, границы включительно)')
+        box_sps.setLayout(grid)
+
+        self.tbl = QTableWidget(0, 3)
+        self.tbl.setHorizontalHeaderLabels(['Слой', 'V мин, м/с', 'V макс, м/с'])
+        self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl.verticalHeader().hide()
+        self.set_layers(cfg.layers)
+        btn_add = QPushButton('Добавить слой')
+        btn_add.clicked.connect(self.add_layer)
+        btn_del = QPushButton('Удалить слой')
+        btn_del.clicked.connect(self.del_layer)
+        lay_btns = QHBoxLayout()
+        lay_btns.addWidget(btn_add)
+        lay_btns.addWidget(btn_del)
+        lay_btns.addStretch()
+        box_lay_inner = QVBoxLayout()
+        box_lay_inner.addWidget(self.tbl)
+        box_lay_inner.addLayout(lay_btns)
+        box_lay = QGroupBox('Слои модели: диапазоны скоростей')
+        box_lay.setLayout(box_lay_inner)
+
+        self.sp_round = spin(1, 1000, cfg.round_step)
+        self.sp_max = dspin(10.0, 1e6, cfg.max_offset, 100.0)
+        self.sp_width = dspin(0.0, 1e4, cfg.min_layer_width, 1.0)
+        self.sp_rms = dspin(0.0, 1e4, cfg.bad_rms, 1.0)
+        calc = QFormLayout()
+        calc.addRow('Округление удалений вниз до, м', self.sp_round)
+        calc.addRow('Дальнее удаление съёмки, м', self.sp_max)
+        calc.addRow('Порог тонкого слоя, м', self.sp_width)
+        calc.addRow('Порог большой невязки, мс', self.sp_rms)
+        box_calc = QGroupBox('Счёт')
+        box_calc.setLayout(calc)
+
+        self.btn_run = QPushButton('Посчитать')
+        self.btn_run.clicked.connect(self.start)
+        self.chk_clear = QCheckBox('Чистить журнал перед запуском')
+        self.chk_clear.setChecked(True)
+        run_row = QHBoxLayout()
+        run_row.addWidget(self.btn_run)
+        run_row.addWidget(self.chk_clear)
+        run_row.addStretch()
+
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMinimumHeight(180)
+
+        left = QVBoxLayout()
+        left.addWidget(box_cols)
+        left.addWidget(box_sps)
+        left.addStretch()
+        right = QVBoxLayout()
+        right.addWidget(box_lay)
+        right.addWidget(box_calc)
+        middle = QHBoxLayout()
+        middle.addLayout(left)
+        middle.addLayout(right)
+
+        root = QVBoxLayout(self)
+        root.addWidget(box_files)
+        root.addLayout(middle)
+        root.addLayout(run_row)
+        root.addWidget(QLabel('Журнал'))
+        root.addWidget(self.log_view)
+        self.resize(880, 720)
+
+    def with_browse(self, edit: QLineEdit, slot) -> QWidget:
+        btn = QPushButton('Обзор…')
+        btn.clicked.connect(slot)
+        box = QHBoxLayout()
+        box.setContentsMargins(0, 0, 0, 0)
+        box.addWidget(edit)
+        box.addWidget(btn)
+        holder = QWidget()
+        holder.setLayout(box)
+        return holder
+
+    # --- таблица слоёв ---------------------------------------------------
+
+    def set_layers(self, lays: list):
+        self.tbl.setRowCount(len(lays))
+        for row, (num, lo, hi) in enumerate(lays):
+            for col, val in enumerate((num, lo, hi)):
+                text = str(int(num)) if col == 0 else f'{val:.0f}'
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(Qt.AlignCenter)
+                self.tbl.setItem(row, col, item)
+
+    def get_layers(self) -> list:
+        lays = []
+        for row in range(self.tbl.rowCount()):
+            vals = []
+            for col in range(3):
+                item = self.tbl.item(row, col)
+                vals.append(item.text().strip() if item else '')
+            try:
+                lays.append((int(float(vals[0])), float(vals[1]), float(vals[2])))
+            except ValueError:
+                raise ValueError(f'Строка слоёв {row + 1}: не число')
+        return lays
+
+    def add_layer(self):
+        row = self.tbl.rowCount()
+        self.tbl.insertRow(row)
+        for col, val in enumerate((row + 1, 0, 0)):
+            item = QTableWidgetItem(str(val))
+            item.setTextAlignment(Qt.AlignCenter)
+            self.tbl.setItem(row, col, item)
+
+    def del_layer(self):
+        row = self.tbl.currentRow()
+        if row < 0:
+            row = self.tbl.rowCount() - 1
+        if row >= 0:
+            self.tbl.removeRow(row)
+
+    # --- выбор файлов ----------------------------------------------------
+
+    def pick_f1(self):
+        name, _ = QFileDialog.getOpenFileName(
+            self, 'Файл LMO', self.ed_f1.text(), 'Текст (*.txt);;Все файлы (*)')
+        if name:
+            self.ed_f1.setText(name)
+
+    def pick_f2(self):
+        name, _ = QFileDialog.getOpenFileName(
+            self, 'Файл SPS', self.ed_f2.text(), 'SPS (*.sps *.s01);;Все файлы (*)')
+        if name:
+            self.ed_f2.setText(name)
+
+    def pick_out(self):
+        name = QFileDialog.getExistingDirectory(
+            self, 'Каталог вывода', self.ed_out.text() or self.ed_f1.text())
+        if name:
+            self.ed_out.setText(name)
+
+    # --- настройки между запусками ---------------------------------------
+
+    def load_settings(self):
+        s = QSettings('scripts_for_work', 'lmoToXY')
+        if not s.value('f1_path'):
+            return
+        self.ed_f1.setText(s.value('f1_path', self.ed_f1.text()))
+        self.ed_f2.setText(s.value('f2_path', self.ed_f2.text()))
+        self.ed_out.setText(s.value('out_dir', ''))
+        for key, box in (('pv_col', self.sp_pv), ('x1_col', self.sp_x1),
+                         ('x2_col', self.sp_x2), ('t0_col', self.sp_t0),
+                         ('v_col', self.sp_v), ('round_step', self.sp_round)):
+            box.setValue(int(s.value(key, box.value())))
+        for key, box in (('max_offset', self.sp_max),
+                         ('min_layer_width', self.sp_width),
+                         ('bad_rms', self.sp_rms)):
+            box.setValue(float(s.value(key, box.value())))
+        for key, (a, b) in self.sps_spins.items():
+            a.setValue(int(s.value(key + '_lo', a.value())))
+            b.setValue(int(s.value(key + '_hi', b.value())))
+        raw = s.value('layers', '')
+        if raw:
+            lays = [tuple(float(v) for v in part.split(','))
+                    for part in raw.split(';') if part]
+            self.set_layers([(int(n), lo, hi) for n, lo, hi in lays])
+
+    def save_settings(self):
+        s = QSettings('scripts_for_work', 'lmoToXY')
+        s.setValue('f1_path', self.ed_f1.text())
+        s.setValue('f2_path', self.ed_f2.text())
+        s.setValue('out_dir', self.ed_out.text())
+        for key, box in (('pv_col', self.sp_pv), ('x1_col', self.sp_x1),
+                         ('x2_col', self.sp_x2), ('t0_col', self.sp_t0),
+                         ('v_col', self.sp_v), ('round_step', self.sp_round),
+                         ('max_offset', self.sp_max),
+                         ('min_layer_width', self.sp_width),
+                         ('bad_rms', self.sp_rms)):
+            s.setValue(key, box.value())
+        for key, (a, b) in self.sps_spins.items():
+            s.setValue(key + '_lo', a.value())
+            s.setValue(key + '_hi', b.value())
+        try:
+            lays = self.get_layers()
+        except ValueError:
+            return
+        s.setValue('layers', ';'.join(f'{n},{lo},{hi}' for n, lo, hi in lays))
+
+    def closeEvent(self, event):
+        self.save_settings()
+        super().closeEvent(event)
+
+    # --- запуск ----------------------------------------------------------
+
+    def collect(self) -> Config:
+        cfg = Config()
+        cfg.f1_path = self.ed_f1.text().strip()
+        cfg.f2_path = self.ed_f2.text().strip()
+        cfg.out_dir = self.ed_out.text().strip()
+        cfg.pv_col = self.sp_pv.value()
+        cfg.x1_col = self.sp_x1.value()
+        cfg.x2_col = self.sp_x2.value()
+        cfg.t0_col = self.sp_t0.value()
+        cfg.v_col = self.sp_v.value()
+        cfg.round_step = self.sp_round.value()
+        cfg.max_offset = self.sp_max.value()
+        cfg.min_layer_width = self.sp_width.value()
+        cfg.bad_rms = self.sp_rms.value()
+        for key, (a, b) in self.sps_spins.items():
+            setattr(cfg, key, (a.value(), b.value()))
+        cfg.layers = self.get_layers()
+        return cfg
+
+    @Slot(str)
+    def append(self, text: str):
+        self.log_view.appendPlainText(text)
+
+    def start(self):
+        try:
+            cfg = self.collect()
+        except ValueError as e:
+            QMessageBox.warning(self, 'Настройки', str(e))
+            return
+        err = check_layers(cfg.layers)
+        if err:
+            QMessageBox.warning(self, 'Слои', err)
+            return
+        if self.chk_clear.isChecked():
+            self.log_view.clear()
+        self.save_settings()
+        self.btn_run.setEnabled(False)
+        self.append('Считаю…')
+
+        self.thread = QThread(self)
+        self.worker = Worker(cfg)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.work)
+        self.worker.message.connect(self.append)
+        self.worker.finished.connect(self.thread.quit)
+        self.thread.finished.connect(self.done)
+        self.thread.start()
+
+    @Slot()
+    def done(self):
+        self.append('Готово')
+        self.btn_run.setEnabled(True)
+        self.worker = None
+        self.thread = None
+
+
+def main():
+    app = QApplication(sys.argv)
+    window = Window()
+    window.show()
+    sys.exit(app.exec())
 
 
 if __name__ == '__main__':
