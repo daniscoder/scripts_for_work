@@ -63,6 +63,10 @@ class Config:
         self.v_col = 4              # скорость, м/с
 
         self.round_step = 10        # шаг округления удалений (вниз)
+        self.min_offset = 10        # ближнее удаление съёмки. В f1 первый кусок
+                                    # начинается с 1 м, и если у ПВ нет первого
+                                    # слоя, окно второго стартовало с этой
+                                    # единицы и после округления вниз давало 0
         self.max_offset = 3000.0    # дальнее удаление съёмки: в f1 последний
                                     # кусок обычно тянется до 1.0E7, до
                                     # бесконечности модель не считаем
@@ -433,12 +437,24 @@ def run(cfg: Config, log=print) -> None:
 
     parent = Path(cfg.out_dir).absolute() if cfg.out_dir else path_1.parent
 
+    # окно слоя не может начинаться ближе ближнего удаления съёмки: у ПВ без
+    # первого слоя модель стартует с 1 м из первой строки f1 и после округления
+    # вниз давала 0
+    off_rows, below = [], []
+    for pv, x, y, lay in rows:
+        if lay[0] < 2:                  # первый слой в удаления не пишем
+            continue
+        lo = max(floor_step(lay[2], cfg.round_step), cfg.min_offset)
+        hi = max(floor_step(lay[3], cfg.round_step), cfg.min_offset)
+        if hi <= lo:
+            below.append(pv)
+            continue
+        off_rows.append((pv, x, y, (lay[0], lo, hi)))
+
     path_off = parent / f'{path_1.stem}_offset.txt'
     n_off = write_blocks(
-        path_off, rows, 2,
-        lambda x, y, lay: '{:.1f}\t{:.1f}\t{}\t{}'.format(
-            x, y, floor_step(lay[2], cfg.round_step),
-            floor_step(lay[3], cfg.round_step)),
+        path_off, off_rows, 2,
+        lambda x, y, lay: '{:.1f}\t{:.1f}\t{}\t{}'.format(x, y, lay[1], lay[2]),
         cfg.layers)
     log(f'удаления: записано {n_off} строк -> {path_off}')
 
@@ -462,6 +478,10 @@ def run(cfg: Config, log=print) -> None:
         uniq = sorted(set(thin))
         log(f'Слой уже {cfg.min_layer_width:.0f} м на {len(uniq)} ПВ: '
             f'{", ".join(uniq[:20])}')
+    if below:
+        uniq = sorted(set(below))
+        log(f'Окно слоя целиком ближе {cfg.min_offset} м и в удаления не '
+            f'попало, {len(uniq)} ПВ: {", ".join(uniq[:20])}')
     if rough:
         rough.sort(reverse=True)
         log(f'Невязка модели больше {cfg.bad_rms:.0f} мс на {len(rough)} ПВ, '
@@ -585,11 +605,13 @@ class Window(QWidget):
         box_lay.setLayout(box_lay_inner)
 
         self.sp_round = spin(1, 1000, cfg.round_step)
+        self.sp_min = spin(0, 100000, cfg.min_offset)
         self.sp_max = dspin(10.0, 1e6, cfg.max_offset, 100.0)
         self.sp_width = dspin(0.0, 1e4, cfg.min_layer_width, 1.0)
         self.sp_rms = dspin(0.0, 1e4, cfg.bad_rms, 1.0)
         calc = QFormLayout()
         calc.addRow('Округление удалений вниз до, м', self.sp_round)
+        calc.addRow('Ближнее удаление съёмки, м', self.sp_min)
         calc.addRow('Дальнее удаление съёмки, м', self.sp_max)
         calc.addRow('Порог тонкого слоя, м', self.sp_width)
         calc.addRow('Порог большой невязки, мс', self.sp_rms)
@@ -709,7 +731,8 @@ class Window(QWidget):
         self.ed_out.setText(s.value('out_dir', ''))
         for key, box in (('pv_col', self.sp_pv), ('x1_col', self.sp_x1),
                          ('x2_col', self.sp_x2), ('t0_col', self.sp_t0),
-                         ('v_col', self.sp_v), ('round_step', self.sp_round)):
+                         ('v_col', self.sp_v), ('round_step', self.sp_round),
+                         ('min_offset', self.sp_min)):
             box.setValue(int(s.value(key, box.value())))
         for key, box in (('max_offset', self.sp_max),
                          ('min_layer_width', self.sp_width),
@@ -732,6 +755,7 @@ class Window(QWidget):
         for key, box in (('pv_col', self.sp_pv), ('x1_col', self.sp_x1),
                          ('x2_col', self.sp_x2), ('t0_col', self.sp_t0),
                          ('v_col', self.sp_v), ('round_step', self.sp_round),
+                         ('min_offset', self.sp_min),
                          ('max_offset', self.sp_max),
                          ('min_layer_width', self.sp_width),
                          ('bad_rms', self.sp_rms)):
@@ -762,6 +786,7 @@ class Window(QWidget):
         cfg.t0_col = self.sp_t0.value()
         cfg.v_col = self.sp_v.value()
         cfg.round_step = self.sp_round.value()
+        cfg.min_offset = self.sp_min.value()
         cfg.max_offset = self.sp_max.value()
         cfg.min_layer_width = self.sp_width.value()
         cfg.bad_rms = self.sp_rms.value()
