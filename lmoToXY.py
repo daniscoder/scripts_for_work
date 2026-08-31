@@ -15,9 +15,15 @@ f1 — блок строк на каждый ПВ, номер ПВ только 
 конца куска совпадает с временем начала следующего. Прямая волна в данных не
 выделена, первый кусок — тоже преломлённая.
 
-Модель: годограф приближается ломаной, по прямой на слой, со свободными узлами,
-скорость каждой прямой зажата в диапазон своего слоя. Узлы ломаной и есть
-границы слоёв в удалениях — то, ради чего всё и считается. Слой берётся в
+Границы слоёв в удалениях — то, ради чего всё и считается, — берутся одним из
+двух способов (настройка method):
+    'lsq'       годограф приближается ломаной, по прямой на слой, со свободными
+                узлами, скорость каждой прямой зажата в диапазон своего слоя.
+                Узлы ломаной и есть границы. Учитываются и времена, и скорости;
+    'threshold' граница там, где кажущаяся скорость пересекает порог между
+                диапазонами соседних слоёв, с интерполяцией между серединами
+                кусков. Времена не участвуют вовсе, скорость слоя считается
+                потом МНК по его окну и в диапазон не зажимается. Слой берётся в
 модель, только если к его диапазону ближе хоть один кусок годографа. Счёт
 статики требует одинакового числа слоёв на всех ПВ, поэтому слой, которого в
 данных нет, по умолчанию пишется вырожденным окном нулевой ширины (настройка
@@ -85,6 +91,19 @@ class Config:
             (2, 1200.0, 2200.0),
             (3, 2200.0, 5600.0),
         ]
+
+        # Чем считать границы слоёв:
+        #   'lsq'       — годограф приближается ломаной, по прямой на слой, узлы
+        #                 свободны, скорость каждой зажата в диапазон своего
+        #                 слоя. Границы выходят из наилучшего приближения всего
+        #                 годографа сразу;
+        #   'threshold' — граница там, где кажущаяся скорость пересекает порог
+        #                 между диапазонами соседних слоёв, с интерполяцией
+        #                 между серединами кусков. Границу задают только сами
+        #                 скорости кусков, времена в неё не входят; скорость
+        #                 слоя считается потом МНК по его окну и в диапазон не
+        #                 зажимается.
+        self.method = 'lsq'
 
         # Что делать со слоем, которого в данных нет (ни один кусок годографа
         # не попадает к нему ближе, чем к соседям). Счёт статики требует
@@ -309,16 +328,88 @@ def init_knots(pieces: list, lays: list, x_beg: float, x_end: float,
                 x = min(max(x1, x_beg), x_end)
                 break
         knots.append(x)
-    # зазор нужен только чтобы узлы не слиплись: разносить их равномерно по
-    # всему диапазону нельзя — спуск потом не вытащит первый узел с сотен метров
+    return order_knots(knots, x_beg, x_end, min_width)
+
+
+def order_knots(knots: list, x_beg: float, x_end: float,
+                min_width: float) -> list:
+    """Границы строго по возрастанию, с зазором.
+
+    Зазор нужен только чтобы они не слиплись: разносить их равномерно по всему
+    диапазону нельзя — спуск потом не вытащит первую границу с сотен метров."""
     n = len(knots)
+    if not n:
+        return []
+    out = list(knots)
     gap = min(min_width, (x_end - x_beg) / (2.0 * (n + 1)))
-    for i in range(n):                      # строго по возрастанию, с зазором
+    for i in range(n):
         lo = x_beg + gap * (i + 1)
         if i:
-            lo = max(lo, knots[i - 1] + gap)
-        knots[i] = min(max(knots[i], lo), x_end - gap * (n - i))
-    return knots
+            lo = max(lo, out[i - 1] + gap)
+        out[i] = min(max(out[i], lo), x_end - gap * (n - i))
+    return out
+
+
+def line_fit(curve: list, a: float, b: float) -> tuple:
+    """МНК-прямая t = A + B*x по куску годографа [a, b], вес 1/x — тот же, что
+    в misfit. Интегралы берём точно по изломам годографа, без дискретизации."""
+    s0, s1, s2 = math.log(b / a), b - a, (b * b - a * a) / 2.0
+    r0 = r1 = 0.0
+    edges = sorted({a, b} | {ln[0] for ln in curve if a < ln[0] < b})
+    for u, v in zip(edges, edges[1:]):
+        c, d = pick(curve, (u + v) / 2.0)[1:]
+        r0 += c * math.log(v / u) + d * (v - u)
+        r1 += c * (v - u) + d * (v * v - u * u) / 2.0
+    det = s0 * s2 - s1 * s1
+    if abs(det) < 1e-12:
+        return 0.0, s1 / max(s2, 1e-12)
+    return (r0 * s2 - r1 * s1) / det, (s0 * r1 - s1 * r0) / det
+
+
+def threshold_x(pieces: list, thr: float, x_beg: float, x_end: float) -> float:
+    """Удаление, на котором кажущаяся скорость пересекает порог thr.
+
+    Скорость куска относится ко всему куску, поэтому смена скорости размазана в
+    переход вокруг общей границы двух кусков, и порог ищется внутри перехода.
+    Ширина перехода — по более короткому из двух кусков: последний кусок в f1
+    всегда тянется до дальнего удаления, и интерполяция между серединами уносила
+    границу на его середину (на проверке 80 м превращались в 840).
+
+    Кажущаяся скорость растёт не строго, поэтому берём первое пересечение."""
+    ends = []
+    for x1, x2, t0, v in pieces:
+        a, b = max(x1, x_beg), min(x2, x_end)
+        if b > a:
+            ends.append((a, b, v))
+    if not ends or ends[0][2] >= thr:
+        return x_beg
+    for (a1, b1, v1), (a2, b2, v2) in zip(ends, ends[1:]):
+        if v2 >= thr > v1:
+            half = min(b1 - a1, b2 - a2) / 2.0
+            f = (thr - v1) / (v2 - v1)
+            return min(max(b1 - half + f * 2.0 * half, x_beg), x_end)
+    return x_end
+
+
+def fit_threshold(pieces: list, lays: list, x_beg: float, x_end: float,
+                  min_width: float) -> tuple:
+    """Границы по порогам скорости. Возвращает (границы, скорости, СКО).
+
+    Порог между соседними слоями — середина зазора между их диапазонами (для
+    смежных диапазонов это их общая граница). Скорость слоя считается МНК по его
+    окну и в диапазон не зажимается: окно уже определено порогом, и подгонять
+    под него ещё и скорость значило бы врать в отчёте."""
+    knots = [threshold_x(pieces, (lays[i][2] + lays[i + 1][1]) / 2.0, x_beg, x_end)
+             for i in range(len(lays) - 1)]
+    knots = order_knots(knots, x_beg, x_end, min_width)
+    curve = curve_lines(pieces)
+    bounds = [x_beg] + knots + [x_end]
+    lines, vels = [], []
+    for i in range(len(lays)):
+        a, b = line_fit(curve, bounds[i], bounds[i + 1])
+        lines.append((bounds[i + 1], a, b))
+        vels.append(1000.0 / b if b > 1e-9 else lays[i][2])
+    return knots, vels, misfit(curve, lines, x_beg, x_end)
 
 
 def moves(p: list, k: int, s: float, n: int, lines: list) -> list:
@@ -410,7 +501,8 @@ def build(pieces: list, cfg: Config) -> tuple:
     if len(lays) == 1:
         model, rms = [(lays[0][0], pieces[0][3], x_beg, x_end)], 0.0
     else:
-        knots, vels, rms = fit(pieces, lays, x_beg, x_end, cfg.min_layer_width)
+        method = fit_threshold if cfg.method == 'threshold' else fit
+        knots, vels, rms = method(pieces, lays, x_beg, x_end, cfg.min_layer_width)
         bounds = [x_beg] + list(knots) + [x_end]
         model = [(lays[i][0], vels[i], bounds[i], bounds[i + 1])
                  for i in range(len(lays))]
@@ -461,7 +553,8 @@ def run(cfg: Config, log=print) -> None:
     log(f'f1: ПВ {len(data)}, f2: точек {len(coords)}')
 
     rows = []           # (ПВ, X, Y, (слой, V, от, до)) — по строке на слой
-    missed, empty, pinned, split, thin, hollow, rough = [], [], [], [], [], [], []
+    missed, empty, pinned, split, outside = [], [], [], [], []
+    thin, hollow, rough = [], [], []
     bands = {lay[0]: lay for lay in cfg.layers}
     # край диапазона, за которым сразу начинается соседний слой, расширять
     # некуда: упор в него значит лишь, что скорость села на границу между
@@ -488,7 +581,9 @@ def run(cfg: Config, log=print) -> None:
             if x_to - x_from <= 0.0:        # слой без вступлений, скорость
                 hollow.append(pv)           # взята серединой диапазона
             else:
-                if abs(v - band[1]) < 1.0:
+                if v < band[1] or v > band[2]:
+                    outside.append(pv)
+                elif abs(v - band[1]) < 1.0:
                     (split if (num, 'lo') in shared else pinned).append(pv)
                 elif abs(v - band[2]) < 1.0:
                     (split if (num, 'hi') in shared else pinned).append(pv)
@@ -535,6 +630,11 @@ def run(cfg: Config, log=print) -> None:
         log(f'Скорость упёрлась в край диапазона на {len(uniq)} ПВ — '
             f'диапазоны стоит расширить: {", ".join(uniq[:20])}'
             f'{" ..." if len(uniq) > 20 else ""}')
+    if outside:
+        uniq = sorted(set(outside))
+        log(f'Скорость слоя вышла за свой диапазон на {len(uniq)} ПВ — порог '
+            f'провёл границу там, где скорость слою уже не отвечает: '
+            f'{", ".join(uniq[:20])}{" ..." if len(uniq) > 20 else ""}')
     if split:
         uniq = sorted(set(split))
         log(f'Скорость села на границу между слоями на {len(uniq)} ПВ — там '
@@ -675,6 +775,12 @@ class Window(QWidget):
         self.sp_max = dspin(10.0, 1e6, cfg.max_offset, 100.0)
         self.sp_width = dspin(0.0, 1e4, cfg.min_layer_width, 1.0)
         self.sp_rms = dspin(0.0, 1e4, cfg.bad_rms, 1.0)
+        self.cb_method = QComboBox()
+        for title, key in (('МНК, ломаная по слоям', 'lsq'),
+                           ('порог по скорости с интерполяцией', 'threshold')):
+            self.cb_method.addItem(title, key)
+        self.cb_method.setCurrentIndex(
+            max(0, self.cb_method.findData(cfg.method)))
         self.cb_missing = QComboBox()
         for title, key in (('вырожденным окном', 'degenerate'),
                            ('подбирать все слои', 'all'),
@@ -683,6 +789,7 @@ class Window(QWidget):
         self.cb_missing.setCurrentIndex(
             max(0, self.cb_missing.findData(cfg.missing)))
         calc = QFormLayout()
+        calc.addRow('Границы слоёв считать', self.cb_method)
         calc.addRow('Округление удалений вниз до, м', self.sp_round)
         calc.addRow('Ближнее удаление съёмки, м', self.sp_min)
         calc.addRow('Дальнее удаление съёмки, м', self.sp_max)
@@ -829,9 +936,10 @@ class Window(QWidget):
         for key, (a, b) in self.sps_spins.items():
             a.setValue(int(s.value(key + '_lo', a.value())))
             b.setValue(int(s.value(key + '_hi', b.value())))
-        pos = self.cb_missing.findData(s.value('missing', self.cb_missing.currentData()))
-        if pos >= 0:
-            self.cb_missing.setCurrentIndex(pos)
+        for key, box in (('method', self.cb_method), ('missing', self.cb_missing)):
+            pos = box.findData(s.value(key, box.currentData()))
+            if pos >= 0:
+                box.setCurrentIndex(pos)
         raw = s.value('layers', '')
         if raw:
             lays = [tuple(float(v) for v in part.split(','))
@@ -854,6 +962,7 @@ class Window(QWidget):
         for key, (a, b) in self.sps_spins.items():
             s.setValue(key + '_lo', a.value())
             s.setValue(key + '_hi', b.value())
+        s.setValue('method', self.cb_method.currentData())
         s.setValue('missing', self.cb_missing.currentData())
         try:
             lays = self.get_layers()
@@ -882,6 +991,7 @@ class Window(QWidget):
         cfg.max_offset = self.sp_max.value()
         cfg.min_layer_width = self.sp_width.value()
         cfg.bad_rms = self.sp_rms.value()
+        cfg.method = self.cb_method.currentData()
         cfg.missing = self.cb_missing.currentData()
         for key, (a, b) in self.sps_spins.items():
             setattr(cfg, key, (a.value(), b.value()))
