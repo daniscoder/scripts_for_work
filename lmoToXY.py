@@ -49,8 +49,8 @@ f2 — SPS с фиксированными позициями (нумераци�
 Формат выхода — блок на слой, номер слоя только в первой строке блока:
     _offset:  <слой> <X> <Y> <мин.удаление> <макс.удаление>   со слоя 2
     _speed:   <слой> <X> <Y> <скорость>                       со слоя 1
-Удаления округляются с шагом round_step, обычным округлением или вниз
-(round_mode), скорости пишутся как есть.
+Удаления округляются с шагом round_step: обычным округлением или сжатием окна
+внутрь (round_mode), скорости пишутся как есть.
 """
 
 import math
@@ -82,8 +82,9 @@ class Config:
         self.v_col = 4              # скорость, м/с
 
         self.round_step = 10        # шаг округления удалений
-        self.round_mode = 'near'    # 'near' — обычное округление к ближайшему,
-                                    # 'down' — вниз
+        self.round_mode = 'near'    # 'near' — обе границы к ближайшему узлу
+                                    # сетки, 'in' — окно внутрь: минимум вверх,
+                                    # максимум вниз
         self.min_offset = 10        # ближнее удаление съёмки. В f1 первый кусок
                                     # начинается с 1 м, и если у ПВ нет первого
                                     # слоя, окно второго стартовало с этой
@@ -609,14 +610,28 @@ def build(pieces: list, cfg: Config) -> tuple:
     return model, rms
 
 
-def round_offset(v: float, step: int, mode: str) -> int:
-    """Удаление к сетке шага step: 'near' — к ближайшему, 'down' — вниз.
+def round_window(x_from: float, x_to: float, step: int, mode: str) -> tuple:
+    """Окно слоя на сетку шага step.
 
-    Соседние слои делят одну границу, поэтому округлять её надо одинаково с
-    обеих сторон — иначе между окнами появится дыра или нахлёст."""
-    if mode == 'down':
-        return int(math.floor(v / step)) * step
-    return int(math.floor(v / step + 0.5)) * step
+    'near' — обе границы к ближайшему узлу. Соседние слои делят одну границу и
+    округляют её одинаково, поэтому окна остаются встык.
+    'in'   — окно сжимается внутрь: минимум вверх, максимум вниз. В окно тогда
+    не попадают трассы у самого перехода, где вступление уже принадлежит
+    соседнему слою, — ценой зазора между окнами соседей.
+
+    Сжимать можно не всегда: на узком слое минимум перескочит максимум. Для
+    такого окна берётся обычное округление — пустое окно хуже, чем окно с
+    краевыми трассами."""
+    def near(v):
+        return int(math.floor(v / step + 0.5)) * step
+
+    if mode == 'in':
+        lo = int(math.ceil(x_from / step)) * step
+        hi = int(math.floor(x_to / step)) * step
+        if hi > lo:
+            return lo, hi
+    lo, hi = near(x_from), near(x_to)
+    return lo, max(hi, lo)
 
 
 def write_blocks(path: Path, rows: list, first_layer: int, fmt,
@@ -700,16 +715,15 @@ def run(cfg: Config, log=print) -> None:
     # окно слоя не может начинаться ближе ближнего удаления съёмки: у ПВ без
     # первого слоя модель стартует с 1 м из первой строки f1 и после округления
     # вниз давала 0
-    off_rows = []
+    off_rows, squeezed = [], []
     for pv, x, y, lay in rows:
         if lay[0] < 2:                  # первый слой в удаления не пишем
             continue
-        lo = max(round_offset(lay[2], cfg.round_step, cfg.round_mode),
-                 cfg.min_offset)
-        hi = max(round_offset(lay[3], cfg.round_step, cfg.round_mode),
-                 cfg.min_offset)
-        if hi < lo:                     # окно целиком ближе ближнего удаления
-            hi = lo
+        lo, hi = round_window(lay[2], lay[3], cfg.round_step, cfg.round_mode)
+        lo = max(lo, cfg.min_offset)    # окно целиком ближе ближнего удаления
+        hi = max(hi, lo)
+        if hi == lo and lay[3] - lay[2] > 0.0:
+            squeezed.append(pv)
         off_rows.append((pv, x, y, (lay[0], lo, hi)))
 
     path_off = parent / f'{path_1.stem}_offset.txt'
@@ -750,6 +764,11 @@ def run(cfg: Config, log=print) -> None:
         uniq = sorted(set(thin))
         log(f'Слой уже {cfg.min_layer_width:.0f} м на {len(uniq)} ПВ: '
             f'{", ".join(uniq[:20])}')
+    if squeezed:
+        uniq = sorted(set(squeezed))
+        log(f'Окно слоя схлопнулось при округлении на {len(uniq)} ПВ — слой '
+            f'уже шага округления: {", ".join(uniq[:20])}'
+            f'{" ..." if len(uniq) > 20 else ""}')
     if hollow:
         uniq = sorted(set(hollow))
         log(f'Слоя нет в данных, вписан вырожденным окном на {len(uniq)} ПВ: '
@@ -878,7 +897,8 @@ class Window(QWidget):
 
         self.sp_round = spin(1, 1000, cfg.round_step)
         self.cb_round = QComboBox()
-        for title, key in (('обычное', 'near'), ('вниз', 'down')):
+        for title, key in (('обычное', 'near'),
+                           ('внутрь: мин вверх, макс вниз', 'in')):
             self.cb_round.addItem(title, key)
         self.cb_round.setCurrentIndex(
             max(0, self.cb_round.findData(cfg.round_mode)))
