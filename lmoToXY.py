@@ -1051,6 +1051,9 @@ class Window(QWidget):
 
     def load_settings(self):
         s = QSettings('scripts_for_work', 'lmoToXY')
+        geometry = s.value('geometry')       # до раннего выхода: размеры окна
+        if geometry is not None:             # помнятся и после первого запуска,
+            self.restoreGeometry(geometry)   # когда путей ещё не сохранено
         if not s.value('f1_path'):
             return
         self.ed_f1.setText(s.value('f1_path', self.ed_f1.text()))
@@ -1081,6 +1084,7 @@ class Window(QWidget):
 
     def save_settings(self):
         s = QSettings('scripts_for_work', 'lmoToXY')
+        s.setValue('geometry', self.saveGeometry())
         s.setValue('f1_path', self.ed_f1.text())
         s.setValue('f2_path', self.ed_f2.text())
         s.setValue('out_dir', self.ed_out.text())
