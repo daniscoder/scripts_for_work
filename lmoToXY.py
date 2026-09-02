@@ -49,7 +49,8 @@ f2 — SPS с фиксированными позициями (нумераци�
 Формат выхода — блок на слой, номер слоя только в первой строке блока:
     _offset:  <слой> <X> <Y> <мин.удаление> <макс.удаление>   со слоя 2
     _speed:   <слой> <X> <Y> <скорость>                       со слоя 1
-Удаления округляются ВНИЗ с шагом round_step, скорости пишутся как есть.
+Удаления округляются с шагом round_step, обычным округлением или вниз
+(round_mode), скорости пишутся как есть.
 """
 
 import math
@@ -80,7 +81,9 @@ class Config:
         self.t0_col = 3             # интерсепт, мс
         self.v_col = 4              # скорость, м/с
 
-        self.round_step = 10        # шаг округления удалений (вниз)
+        self.round_step = 10        # шаг округления удалений
+        self.round_mode = 'near'    # 'near' — обычное округление к ближайшему,
+                                    # 'down' — вниз
         self.min_offset = 10        # ближнее удаление съёмки. В f1 первый кусок
                                     # начинается с 1 м, и если у ПВ нет первого
                                     # слоя, окно второго стартовало с этой
@@ -606,8 +609,14 @@ def build(pieces: list, cfg: Config) -> tuple:
     return model, rms
 
 
-def floor_step(v: float, step: int) -> int:
-    return int(math.floor(v / step)) * step
+def round_offset(v: float, step: int, mode: str) -> int:
+    """Удаление к сетке шага step: 'near' — к ближайшему, 'down' — вниз.
+
+    Соседние слои делят одну границу, поэтому округлять её надо одинаково с
+    обеих сторон — иначе между окнами появится дыра или нахлёст."""
+    if mode == 'down':
+        return int(math.floor(v / step)) * step
+    return int(math.floor(v / step + 0.5)) * step
 
 
 def write_blocks(path: Path, rows: list, first_layer: int, fmt,
@@ -695,8 +704,10 @@ def run(cfg: Config, log=print) -> None:
     for pv, x, y, lay in rows:
         if lay[0] < 2:                  # первый слой в удаления не пишем
             continue
-        lo = max(floor_step(lay[2], cfg.round_step), cfg.min_offset)
-        hi = max(floor_step(lay[3], cfg.round_step), cfg.min_offset)
+        lo = max(round_offset(lay[2], cfg.round_step, cfg.round_mode),
+                 cfg.min_offset)
+        hi = max(round_offset(lay[3], cfg.round_step, cfg.round_mode),
+                 cfg.min_offset)
         if hi < lo:                     # окно целиком ближе ближнего удаления
             hi = lo
         off_rows.append((pv, x, y, (lay[0], lo, hi)))
@@ -866,6 +877,11 @@ class Window(QWidget):
         box_lay.setLayout(box_lay_inner)
 
         self.sp_round = spin(1, 1000, cfg.round_step)
+        self.cb_round = QComboBox()
+        for title, key in (('обычное', 'near'), ('вниз', 'down')):
+            self.cb_round.addItem(title, key)
+        self.cb_round.setCurrentIndex(
+            max(0, self.cb_round.findData(cfg.round_mode)))
         self.sp_min = spin(0, 100000, cfg.min_offset)
         self.sp_max = dspin(10.0, 1e6, cfg.max_offset, 100.0)
         self.sp_width = dspin(0.0, 1e4, cfg.min_layer_width, 1.0)
@@ -885,7 +901,8 @@ class Window(QWidget):
             max(0, self.cb_missing.findData(cfg.missing)))
         calc = QFormLayout()
         calc.addRow('Границы слоёв считать', self.cb_method)
-        calc.addRow('Округление удалений вниз до, м', self.sp_round)
+        calc.addRow('Округление удалений до, м', self.sp_round)
+        calc.addRow('Округление удалений', self.cb_round)
         calc.addRow('Ближнее удаление съёмки, м', self.sp_min)
         calc.addRow('Дальнее удаление съёмки, м', self.sp_max)
         calc.addRow('Порог тонкого слоя, м', self.sp_width)
@@ -1031,7 +1048,8 @@ class Window(QWidget):
         for key, (a, b) in self.sps_spins.items():
             a.setValue(int(s.value(key + '_lo', a.value())))
             b.setValue(int(s.value(key + '_hi', b.value())))
-        for key, box in (('method', self.cb_method), ('missing', self.cb_missing)):
+        for key, box in (('round_mode', self.cb_round),
+                         ('method', self.cb_method), ('missing', self.cb_missing)):
             pos = box.findData(s.value(key, box.currentData()))
             if pos >= 0:
                 box.setCurrentIndex(pos)
@@ -1057,6 +1075,7 @@ class Window(QWidget):
         for key, (a, b) in self.sps_spins.items():
             s.setValue(key + '_lo', a.value())
             s.setValue(key + '_hi', b.value())
+        s.setValue('round_mode', self.cb_round.currentData())
         s.setValue('method', self.cb_method.currentData())
         s.setValue('missing', self.cb_missing.currentData())
         try:
@@ -1086,6 +1105,7 @@ class Window(QWidget):
         cfg.max_offset = self.sp_max.value()
         cfg.min_layer_width = self.sp_width.value()
         cfg.bad_rms = self.sp_rms.value()
+        cfg.round_mode = self.cb_round.currentData()
         cfg.method = self.cb_method.currentData()
         cfg.missing = self.cb_missing.currentData()
         for key, (a, b) in self.sps_spins.items():
