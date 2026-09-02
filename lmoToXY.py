@@ -438,23 +438,32 @@ def line_fit(curve: list, a: float, b: float) -> tuple:
         r0 += c * math.log(v / u) + d * (v - u)
         r1 += c * (v - u) + d * (v * v - u * u) / 2.0
     det = s0 * s2 - s1 * s1
-    if abs(det) < 1e-12:
-        return 0.0, s1 / max(s2, 1e-12)
+    if abs(det) < 1e-12:                # окно схлопнулось, МНК вырожден
+        ln = pick(curve, (a + b) / 2.0)
+        return ln[1], ln[2]
     return (r0 * s2 - r1 * s1) / det, (s0 * r1 - s1 * r0) / det
 
 
-def window_vels(curve: list, bounds: list) -> tuple:
+def window_vels(curve: list, bounds: list, lays: list,
+                min_width: float) -> tuple:
     """Скорости слоёв по их собственным окнам: (скорости, прямые).
 
     Скорость слоя считается МНК по его окну, а не берётся из общей ломаной.
     Границы заданы данными и подбору не подчиняются, поэтому ломаная, вытягивая
     общую невязку, перекашивала скорости: на проверке второй слой выходил
-    1299 м/с там, где кусок годографа даёт 2104."""
+    1299 м/с там, где кусок годографа даёт 2104.
+
+    По окну уже min_width скорость не считается вовсе — берётся середина
+    диапазона слоя. Такое окно бывает у слоя, которого в данных нет: МНК по нему
+    вырождается и выдавал скорости вроде 45126 м/с."""
     lines, vels = [], []
-    for a, b in zip(bounds, bounds[1:]):
+    for (a, b), lay in zip(zip(bounds, bounds[1:]), lays):
         ca, cb = line_fit(curve, a, b)
         lines.append((b, ca, cb))
-        vels.append(1000.0 / cb if cb > 1e-9 else 0.0)
+        if b - a < min_width or cb <= 1e-9:
+            vels.append((lay[1] + lay[2]) / 2.0)
+        else:
+            vels.append(1000.0 / cb)
     return vels, lines
 
 
@@ -495,7 +504,7 @@ def fit_threshold(pieces: list, lays: list, x_beg: float, x_end: float,
              for i in range(len(lays) - 1)]
     knots = clamp_knots(knots, limits, x_end)
     curve = curve_lines(pieces)
-    vels, lines = window_vels(curve, [x_beg] + knots + [x_end])
+    vels, lines = window_vels(curve, [x_beg] + knots + [x_end], lays, min_width)
     return knots, vels, misfit(curve, lines, x_beg, x_end)
 
 
@@ -584,7 +593,7 @@ def fit(pieces: list, lays: list, x_beg: float, x_end: float,
             if max(step) < 1e-4:
                 break
     knots = list(p[n + 1:])
-    vels, lines = window_vels(curve, [x_beg] + knots + [x_end])
+    vels, lines = window_vels(curve, [x_beg] + knots + [x_end], lays, min_width)
     return knots, vels, misfit(curve, lines, x_beg, x_end)
 
 
