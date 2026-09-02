@@ -35,9 +35,10 @@ f1 — блок строк на каждый ПВ, номер ПВ только 
 
 Слой берётся в модель, только если к его диапазону ближе хоть один кусок
 годографа. Счёт статики требует одинакового числа слоёв на всех ПВ, поэтому
-слой, которого в данных нет, по умолчанию всё равно пишется — окном шириной в
-шаг округления, а следующий слой на столько же сдвигается (настройка missing:
-'degenerate' | 'all' | 'skip').
+слой, которого в данных нет, всё равно пишется: окном шириной в шаг округления
+или с шириной и скоростью, взятыми с ближайших ПВ, где слой выделен (настройка
+missing: 'degenerate' | 'neighbours' | 'all' | 'skip'). Следующий слой на
+столько же сдвигается.
 
 Скорость может упереться в край диапазона — значит данные хотят быстрее или
 медленнее, чем задано. Такие ПВ считаются, но их число печатается: если их
@@ -129,8 +130,14 @@ class Config:
         #                  серединой диапазона. Слоёв всегда поровну;
         #   'all'        — подбор всегда ведётся всеми слоями. Окно выйдет
         #                  ненулевым, но его границы взяты не из данных;
+        #   'neighbours' — ширина окна и скорость берутся с ближайших ПВ, где
+        #                  слой выделен: ВЧР вдоль профиля меняется плавно, и
+        #                  пропуск чаще от редкой пикировки, чем от геологии.
+        #                  Где соседей в радиусе нет — как 'degenerate';
         #   'skip'       — слой не пишется вовсе. Число слоёв по ПВ разное.
         self.missing = 'degenerate'
+        self.fill_donors = 5        # сколько ближайших ПВ берём в медиану
+        self.fill_radius = 2000.0   # дальше этого за соседей не считаем, м
 
         self.min_layer_width = 5.0  # слой уже этого по удалениям — в отчёт
         self.bad_rms = 10.0         # невязка модели с годографом выше — тоже
@@ -615,12 +622,37 @@ def build(pieces: list, cfg: Config) -> tuple:
         bounds = [x_beg] + list(knots) + [x_end]
         model = [(lays[i][0], vels[i], bounds[i], bounds[i + 1])
                  for i in range(len(lays))]
-    if cfg.missing == 'degenerate' and len(model) < len(cfg.layers):
+    if cfg.missing in ('degenerate', 'neighbours') and len(model) < len(cfg.layers):
         model = pad_missing(model, cfg.layers, x_beg, x_end)
     return model, rms
 
 
-def spread_empty(model: list, step: int) -> list:
+def median(vals: list) -> float:
+    vals = sorted(vals)
+    n = len(vals)
+    return vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2.0
+
+
+def nearest_fill(donors: list, xy: tuple, count: int, radius: float):
+    """Медианные ширина окна и скорость по ближайшим ПВ, где слой выделен.
+
+    Медиана, а не среднее: один сосед с промахом пикировки не должен утащить
+    заполнение за собой. Ширина окна, а не сами удаления: ближнюю границу ПВ
+    знает сам — он видит, где кончается предыдущий слой, — неизвестна только
+    протяжённость пропавшего."""
+    near = []
+    for dx, dy, w, v in donors:
+        d = math.hypot(dx - xy[0], dy - xy[1])
+        if d <= radius:
+            near.append((d, w, v))
+    if not near:
+        return None
+    near.sort()
+    near = near[:count]
+    return median([w for _, w, _ in near]), median([v for _, _, v in near])
+
+
+def spread_empty(model: list, step: int, fills: dict = None) -> list:
     """Слою без данных — окно шириной в шаг округления вместо нулевого.
 
     Окно вида «70 70» счёту не годится, а просто расширить его нельзя: оно
@@ -630,13 +662,21 @@ def spread_empty(model: list, step: int) -> list:
     кончалась на дальнем удалении; у последнего слоя, наоборот, место берётся
     слева, за ним ничего нет."""
     x_beg, x_end = model[0][2], model[-1][3]
-    need = [max(b - a, 0.0) or float(step) for _, _, a, b in model]
+    fills = fills or {}
+    need, vels = [], []
+    for num, v, a, b in model:
+        w = b - a
+        if w <= 0.0:                    # пустой слой: ширина и скорость либо
+            w, v = fills.get(num, (float(step), v))   # с соседних ПВ, либо
+            w = max(w, float(step))                   # минимальные
+        need.append(w)
+        vels.append(v)
     extra = sum(need) - (x_end - x_beg)
     if extra > 0:
         i = max(range(len(need)), key=lambda j: need[j])
         need[i] = max(need[i] - extra, float(step))
     out, pos = [], x_beg
-    for (num, v, a, b), w in zip(model, need):
+    for (num, _, a, b), w, v in zip(model, need, vels):
         out.append((num, v, pos, pos + w))
         pos += w
     return out
@@ -705,7 +745,7 @@ def run(cfg: Config, log=print) -> None:
 
     rows = []           # (ПВ, X, Y, (слой, V, от, до)) — по строке на слой
     missed, empty, pinned, split, outside = [], [], [], [], []
-    thin, hollow, rough = [], [], []
+    thin, hollow, rough, lonely = [], [], [], []
     bands = {lay[0]: lay for lay in cfg.layers}
     # край диапазона, за которым сразу начинается соседний слой, расширять
     # некуда: упор в него значит лишь, что скорость села на границу между
@@ -715,6 +755,9 @@ def run(cfg: Config, log=print) -> None:
         if abs(a[2] - b[1]) < 1e-9:
             shared.add((a[0], 'hi'))
             shared.add((b[0], 'lo'))
+    # первый проход — модели по всем ПВ. Заполнять пустые слои по соседям можно
+    # только когда посчитаны все: донор — это ПВ, где слой выделен
+    shots = []
     for pv, pieces in data:
         xy = coords.get(pv)
         if xy is None:
@@ -731,7 +774,26 @@ def run(cfg: Config, log=print) -> None:
         stub = {lay[0] for lay in model if lay[3] - lay[2] <= 0.0}
         if stub:
             hollow.append(pv)
-            model = spread_empty(model, cfg.round_step)
+        shots.append((pv, xy, model, stub))
+
+    donors = {}
+    if cfg.missing == 'neighbours':
+        for pv, xy, model, stub in shots:
+            for num, v, a, b in model:
+                if num not in stub:
+                    donors.setdefault(num, []).append((xy[0], xy[1], b - a, v))
+
+    for pv, xy, model, stub in shots:
+        if stub:
+            fills = {}
+            for num in sorted(stub):
+                got = nearest_fill(donors.get(num, []), xy,
+                                   cfg.fill_donors, cfg.fill_radius)
+                if got:
+                    fills[num] = got
+                elif cfg.missing == 'neighbours':
+                    lonely.append(pv)
+            model = spread_empty(model, cfg.round_step, fills)
         for lay in model:
             num, v, x_from, x_to = lay
             band = bands[num]
@@ -807,8 +869,14 @@ def run(cfg: Config, log=print) -> None:
             f'{" ..." if len(uniq) > 20 else ""}')
     if hollow:
         uniq = sorted(set(hollow))
-        log(f'Слоя нет в данных, вписан окном в {cfg.round_step} м на '
-            f'{len(uniq)} ПВ: '
+        how = ('заполняется по соседним ПВ' if cfg.missing == 'neighbours'
+               else f'вписан окном в {cfg.round_step} м')
+        log(f'Слоя нет в данных на {len(uniq)} ПВ, {how}: '
+            f'{", ".join(uniq[:20])}{" ..." if len(uniq) > 20 else ""}')
+    if lonely:
+        uniq = sorted(set(lonely))
+        log(f'Соседей с этим слоем нет в радиусе {cfg.fill_radius:.0f} м на '
+            f'{len(uniq)} ПВ, окно там в {cfg.round_step} м: '
             f'{", ".join(uniq[:20])}{" ..." if len(uniq) > 20 else ""}')
     if rough:
         rough.sort(reverse=True)
@@ -949,8 +1017,11 @@ class Window(QWidget):
             self.cb_method.addItem(title, key)
         self.cb_method.setCurrentIndex(
             max(0, self.cb_method.findData(cfg.method)))
+        self.sp_donors = spin(1, 100, cfg.fill_donors)
+        self.sp_radius = dspin(0.0, 1e6, cfg.fill_radius, 100.0)
         self.cb_missing = QComboBox()
-        for title, key in (('вырожденным окном', 'degenerate'),
+        for title, key in (('окном в шаг округления', 'degenerate'),
+                           ('заполнить по соседним ПВ', 'neighbours'),
                            ('подбирать все слои', 'all'),
                            ('пропускать', 'skip')):
             self.cb_missing.addItem(title, key)
@@ -965,6 +1036,8 @@ class Window(QWidget):
         calc.addRow('Порог тонкого слоя, м', self.sp_width)
         calc.addRow('Порог большой невязки, мс', self.sp_rms)
         calc.addRow('Слой, которого нет в данных', self.cb_missing)
+        calc.addRow('Соседей в медиану заполнения', self.sp_donors)
+        calc.addRow('Радиус поиска соседей, м', self.sp_radius)
         box_calc = QGroupBox('Счёт')
         box_calc.setLayout(calc)
 
@@ -1099,9 +1172,11 @@ class Window(QWidget):
         for key, box in (('pv_col', self.sp_pv), ('x1_col', self.sp_x1),
                          ('x2_col', self.sp_x2), ('t0_col', self.sp_t0),
                          ('v_col', self.sp_v), ('round_step', self.sp_round),
-                         ('min_offset', self.sp_min)):
+                         ('min_offset', self.sp_min),
+                         ('fill_donors', self.sp_donors)):
             box.setValue(int(s.value(key, box.value())))
         for key, box in (('max_offset', self.sp_max),
+                         ('fill_radius', self.sp_radius),
                          ('min_layer_width', self.sp_width),
                          ('bad_rms', self.sp_rms)):
             box.setValue(float(s.value(key, box.value())))
@@ -1129,6 +1204,8 @@ class Window(QWidget):
                          ('x2_col', self.sp_x2), ('t0_col', self.sp_t0),
                          ('v_col', self.sp_v), ('round_step', self.sp_round),
                          ('min_offset', self.sp_min),
+                         ('fill_donors', self.sp_donors),
+                         ('fill_radius', self.sp_radius),
                          ('max_offset', self.sp_max),
                          ('min_layer_width', self.sp_width),
                          ('bad_rms', self.sp_rms)):
@@ -1169,6 +1246,8 @@ class Window(QWidget):
         cfg.round_mode = self.cb_round.currentData()
         cfg.method = self.cb_method.currentData()
         cfg.missing = self.cb_missing.currentData()
+        cfg.fill_donors = self.sp_donors.value()
+        cfg.fill_radius = self.sp_radius.value()
         for key, (a, b) in self.sps_spins.items():
             setattr(cfg, key, (a.value(), b.value()))
         cfg.layers = self.get_layers()
