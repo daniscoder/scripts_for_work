@@ -37,8 +37,9 @@ f1 — блок строк на каждый ПВ, номер ПВ только 
 годографа. Счёт статики требует одинакового числа слоёв на всех ПВ, поэтому
 слой, которого в данных нет, всё равно пишется: окном шириной в шаг округления
 или с шириной и скоростью, взятыми с ближайших ПВ, где слой выделен (настройка
-missing: 'degenerate' | 'neighbours' | 'all' | 'skip'). Следующий слой на
-столько же сдвигается.
+missing: 'degenerate' | 'neighbours' | 'all' | 'skip'). Уже шага округления окно
+не бывает — Omega требует строго max > min, — а следующий слой сдвигается на
+столько же, сколько добавлено.
 
 Скорость может упереться в край диапазона — значит данные хотят быстрее или
 медленнее, чем задано. Такие ПВ считаются, но их число печатается: если их
@@ -654,14 +655,19 @@ def nearest_fill(donors: list, xy: tuple, count: int, radius: float):
 
 
 def spread_empty(model: list, step: int, fills: dict = None) -> list:
-    """Слою без данных — окно шириной в шаг округления вместо нулевого.
+    """Развести слои так, чтобы каждый был не уже шага округления.
 
-    Окно вида «70 70» счёту не годится, а просто расширить его нельзя: оно
-    налезет на соседа. Место берётся у следующего слоя — там, где вступления
-    пропавшего слоя и были бы, — поэтому всё, что за ним, сдвигается вправо.
-    Набежавший излишек снимается с самого широкого слоя, чтобы модель по-прежнему
-    кончалась на дальнем удалении; у последнего слоя, наоборот, место берётся
-    слева, за ним ничего нет."""
+    Окно вида «130 130» Omega не принимает, ей нужно строго max > min. Уже
+    шага округления слой получается двумя путями: его нет в данных вовсе
+    (нулевая ширина) или он есть, но тоньше шага, и обе границы садятся на
+    один узел сетки.
+
+    Расширить окно на месте нельзя: оно налезет на соседа. Место берётся у
+    следующего слоя — там, где вступления узкого слоя и были бы, — поэтому
+    всё, что за ним, сдвигается вправо. Набежавший излишек снимается с
+    самого широкого слоя, чтобы модель по-прежнему кончалась на дальнем
+    удалении; у последнего слоя, наоборот, место берётся слева, за ним
+    ничего нет."""
     x_beg, x_end = model[0][2], model[-1][3]
     fills = fills or {}
     need, vels = [], []
@@ -669,8 +675,7 @@ def spread_empty(model: list, step: int, fills: dict = None) -> list:
         w = b - a
         if w <= 0.0:                    # пустой слой: ширина и скорость либо
             w, v = fills.get(num, (float(step), v))   # с соседних ПВ, либо
-            w = max(w, float(step))                   # минимальные
-        need.append(w)
+        need.append(max(w, float(step)))              # минимальные
         vels.append(v)
     extra = sum(need) - (x_end - x_beg)
     if extra > 0:
@@ -785,16 +790,15 @@ def run(cfg: Config, log=print) -> None:
                     donors.setdefault(num, []).append((xy[0], xy[1], b - a, v))
 
     for pv, xy, model, stub in shots:
-        if stub:
-            fills = {}
-            for num in sorted(stub):
-                got = nearest_fill(donors.get(num, []), xy,
-                                   cfg.fill_donors, cfg.fill_radius)
-                if got:
-                    fills[num] = got
-                elif cfg.missing == 'neighbours':
-                    lonely.append(pv)
-            model = spread_empty(model, cfg.round_step, fills)
+        fills = {}
+        for num in sorted(stub):
+            got = nearest_fill(donors.get(num, []), xy,
+                               cfg.fill_donors, cfg.fill_radius)
+            if got:
+                fills[num] = got
+            elif cfg.missing == 'neighbours':
+                lonely.append(pv)
+        model = spread_empty(model, cfg.round_step, fills)
         for lay in model:
             num, v, x_from, x_to = lay
             band = bands[num]
@@ -815,14 +819,20 @@ def run(cfg: Config, log=print) -> None:
     # первого слоя модель стартует с 1 м из первой строки f1 и после округления
     # вниз давала 0
     off_rows, squeezed = [], []
+    prev_pv, prev_hi = None, None
     for pv, x, y, lay in rows:
+        if pv != prev_pv:
+            prev_pv, prev_hi = pv, None
         if lay[0] < 2:                  # первый слой в удаления не пишем
             continue
         lo, hi = round_window(lay[2], lay[3], cfg.round_step, cfg.round_mode)
         lo = max(lo, cfg.min_offset)    # окно целиком ближе ближнего удаления
-        hi = max(hi, lo)
-        if hi == lo and lay[3] - lay[2] > 0.0:
+        if prev_hi is not None:         # соседние окна не должны налезать
+            lo = max(lo, prev_hi)
+        if hi <= lo:                    # Omega требует строго max > min
+            hi = lo + cfg.round_step
             squeezed.append(pv)
+        prev_hi = hi
         off_rows.append((pv, x, y, (lay[0], lo, hi)))
 
     if not rows:
@@ -872,8 +882,8 @@ def run(cfg: Config, log=print) -> None:
             f'{", ".join(uniq[:20])}')
     if squeezed:
         uniq = sorted(set(squeezed))
-        log(f'Окно слоя схлопнулось при округлении на {len(uniq)} ПВ — слой '
-            f'уже шага округления: {", ".join(uniq[:20])}'
+        log(f'Окно слоя пришлось растянуть на {len(uniq)} ПВ — после '
+            f'округления его границы совпали: {", ".join(uniq[:20])}'
             f'{" ..." if len(uniq) > 20 else ""}')
     if hollow:
         uniq = sorted(set(hollow))
