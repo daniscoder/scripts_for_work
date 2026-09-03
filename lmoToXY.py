@@ -825,19 +825,26 @@ def run(cfg: Config, log=print) -> None:
             squeezed.append(pv)
         off_rows.append((pv, x, y, (lay[0], lo, hi)))
 
-    path_off = parent / f'{path_1.stem}_offset.txt'
-    n_off = write_blocks(
-        path_off, off_rows, 2,
-        lambda x, y, lay: '{:.1f}\t{:.1f}\t{}\t{}'.format(x, y, lay[1], lay[2]),
-        cfg.layers)
-    log(f'удаления: записано {n_off} строк -> {path_off}')
+    if not rows:
+        # пустой прогон файлы не переписывает: чаще всего это несовпавший SPS,
+        # и прежний хороший расчёт затирать нулём нельзя
+        log('Ни одной строки не вышло — выходные файлы не тронуты. Проверьте '
+            'SPS: номера ПВ в нём должны сходиться с первой колонкой LMO')
+    else:
+        path_off = parent / f'{path_1.stem}_offset.txt'
+        n_off = write_blocks(
+            path_off, off_rows, 2,
+            lambda x, y, lay: '{:.1f}\t{:.1f}\t{}\t{}'.format(
+                x, y, lay[1], lay[2]),
+            cfg.layers)
+        log(f'удаления: записано {n_off} строк -> {path_off}')
 
-    path_vel = parent / f'{path_1.stem}_velocity.txt'
-    n_vel = write_blocks(
-        path_vel, rows, 1,
-        lambda x, y, lay: '{:.1f}\t{:.1f}\t{:.1f}'.format(x, y, lay[1]),
-        cfg.layers)
-    log(f'скорости: записано {n_vel} строк -> {path_vel}')
+        path_vel = parent / f'{path_1.stem}_velocity.txt'
+        n_vel = write_blocks(
+            path_vel, rows, 1,
+            lambda x, y, lay: '{:.1f}\t{:.1f}\t{:.1f}'.format(x, y, lay[1]),
+            cfg.layers)
+        log(f'скорости: записано {n_vel} строк -> {path_vel}')
 
     if missed:
         log(f'Нет координат для {len(missed)} ПВ: {", ".join(missed[:20])}'
@@ -934,9 +941,13 @@ def merge_dir(dir_path: str, log=print) -> None:
         if not files:
             log(f'{kind}: в каталоге нечего объединять')
             continue
-        merged, seen, doubles = {}, set(), 0
+        merged, seen, doubles, blank = {}, set(), 0, []
         for path in files:
-            for num, rows in read_blocks(path, log).items():
+            blocks = read_blocks(path, log)
+            if not blocks:              # пустой файл — обычно неудачный прогон
+                blank.append(path.name)
+                continue
+            for num, rows in blocks.items():
                 for row in rows:
                     key = (num,) + tuple(row[:2])       # слой и координаты
                     if key in seen:
@@ -944,6 +955,12 @@ def merge_dir(dir_path: str, log=print) -> None:
                         continue
                     seen.add(key)
                     merged.setdefault(num, []).append(row)
+        if blank:
+            log(f'{kind}: пустых файлов пропущено {len(blank)}: '
+                f'{", ".join(blank[:10])}{" ..." if len(blank) > 10 else ""}')
+        if not merged:
+            log(f'{kind}: ни одной строки, {out_path.name} не тронут')
+            continue
         written = 0
         with open(out_path, 'w') as f:
             for num in sorted(merged):
@@ -951,7 +968,7 @@ def merge_dir(dir_path: str, log=print) -> None:
                     f.write('{}\t{}\n'.format(num if not i else '',
                                               '\t'.join(row)))
                     written += 1
-        log(f'{kind}: {len(files)} файлов, слоёв {len(merged)}, '
+        log(f'{kind}: {len(files) - len(blank)} файлов, слоёв {len(merged)}, '
             f'строк {written} -> {out_path}')
         if doubles:
             log(f'{kind}: повторов по координатам пропущено {doubles}')
