@@ -4,7 +4,7 @@
 Из файла LMO (f1) на каждый ПВ строим слоистую модель ВЧР, координаты X/Y
 тянем из SPS (f2). За один прогон пишем оба файла — <f1>_offset.txt (границы
 слоёв в удалениях, для расчёта статики по первым вступлениям) и
-<f1>_speed.txt (скорости слоёв).
+<f1>_velocity.txt (скорости слоёв).
 
 Настройки задаются в окне (PySide6), значения по умолчанию — в Config. Счёт от
 интерфейса отделён: run(cfg, log) работает и без Qt, если импортировать модуль.
@@ -50,7 +50,7 @@ f2 — SPS с фиксированными позициями (нумераци�
 
 Формат выхода — блок на слой, номер слоя только в первой строке блока:
     _offset:  <слой> <X> <Y> <мин.удаление> <макс.удаление>   со слоя 2
-    _speed:   <слой> <X> <Y> <скорость>                       со слоя 1
+    _velocity: <слой> <X> <Y> <скорость>                      со слоя 1
 Удаления округляются с шагом round_step: обычным округлением или сжатием окна
 внутрь (round_mode), скорости пишутся как есть.
 """
@@ -76,6 +76,7 @@ class Config:
         self.f1_path = r"d:\Processing\2026_Юкола-нефть\stat\refractionLayers\LMO_tabmashinskiy_2025.txt"
         self.f2_path = r"d:\Processing\2026_Юкола-нефть\Тамбашинский\mesa\sps\tambashinskiy_2025.sps"
         self.out_dir = r""          # пусто — класть рядом с f1
+        self.merge_dir = r""        # каталог для объединения выходных файлов
 
         self.pv_col = 0             # колонка номера ПВ в f1
         self.x1_col = 1             # мин. удаление куска годографа
@@ -831,12 +832,12 @@ def run(cfg: Config, log=print) -> None:
         cfg.layers)
     log(f'удаления: записано {n_off} строк -> {path_off}')
 
-    path_spd = parent / f'{path_1.stem}_speed.txt'
-    n_spd = write_blocks(
-        path_spd, rows, 1,
+    path_vel = parent / f'{path_1.stem}_velocity.txt'
+    n_vel = write_blocks(
+        path_vel, rows, 1,
         lambda x, y, lay: '{:.1f}\t{:.1f}\t{:.1f}'.format(x, y, lay[1]),
         cfg.layers)
-    log(f'скорости: записано {n_spd} строк -> {path_spd}')
+    log(f'скорости: записано {n_vel} строк -> {path_vel}')
 
     if missed:
         log(f'Нет координат для {len(missed)} ПВ: {", ".join(missed[:20])}'
@@ -884,6 +885,78 @@ def run(cfg: Config, log=print) -> None:
             'худшие: ' + ', '.join(f'{pv} ({r:.1f} мс)' for r, pv in rough[:10]))
 
 
+def read_blocks(path: Path, log) -> dict:
+    """{номер слоя: [строки без номера]} из готового выходного файла.
+
+    Номер слоя стоит только в первой строке своего блока, поэтому склеить
+    файлы просто конкатенацией нельзя — блоки надо разобрать и собрать
+    заново."""
+    result, num = {}, None
+    with open(path, 'r') as f:
+        for i, s in enumerate(f, 1):
+            s = s.rstrip('\n').rstrip('\r')
+            if not s.strip():
+                continue
+            parts = s.split('\t')
+            head = parts[0].strip()
+            if head:
+                try:
+                    num = int(float(head))
+                except ValueError:
+                    log(f'{path.name}, строка {i}: номер слоя не число — пропуск')
+                    num = None
+                    continue
+            if num is None:
+                log(f'{path.name}, строка {i}: до первого номера слоя — пропуск')
+                continue
+            result.setdefault(num, []).append(parts[1:])
+    return result
+
+
+def merge_dir(dir_path: str, log=print) -> None:
+    """Собрать выходные файлы нескольких проектов в один на каждый вид.
+
+    Результат кладётся в тот же каталог с его именем в начале и в разбор не
+    берётся, иначе повторный прогон складывал бы его сам в себя. Строки с
+    одинаковыми слоем и координатами пропускаются: проекты по краям
+    перекрываются, и один ПВ попадает в оба."""
+    folder = Path(dir_path).absolute()
+    if not folder.is_dir():
+        log(f'Не каталог: {folder}')
+        return
+    kinds = (('offset', ('*_offset.txt',)),
+             ('velocity', ('*_velocity.txt', '*_speed.txt')))
+    for kind, patterns in kinds:
+        out_path = folder / f'{folder.name}_{kind}.txt'
+        files = []
+        for pat in patterns:
+            files += [p for p in sorted(folder.glob(pat)) if p != out_path]
+        if not files:
+            log(f'{kind}: в каталоге нечего объединять')
+            continue
+        merged, seen, doubles = {}, set(), 0
+        for path in files:
+            for num, rows in read_blocks(path, log).items():
+                for row in rows:
+                    key = (num,) + tuple(row[:2])       # слой и координаты
+                    if key in seen:
+                        doubles += 1
+                        continue
+                    seen.add(key)
+                    merged.setdefault(num, []).append(row)
+        written = 0
+        with open(out_path, 'w') as f:
+            for num in sorted(merged):
+                for i, row in enumerate(merged[num]):
+                    f.write('{}\t{}\n'.format(num if not i else '',
+                                              '\t'.join(row)))
+                    written += 1
+        log(f'{kind}: {len(files)} файлов, слоёв {len(merged)}, '
+            f'строк {written} -> {out_path}')
+        if doubles:
+            log(f'{kind}: повторов по координатам пропущено {doubles}')
+
+
 class Worker(QObject):
     """Счёт в отдельном потоке: на реальном массиве это минуты, в главном потоке
     окно бы всё это время висело."""
@@ -891,14 +964,14 @@ class Worker(QObject):
     message = Signal(str)
     finished = Signal()
 
-    def __init__(self, cfg: Config):
+    def __init__(self, job):
         super().__init__()
-        self.cfg = cfg
+        self.job = job
 
     @Slot()
     def work(self):
         try:
-            run(self.cfg, self.message.emit)
+            self.job(self.message.emit)
         except Exception as e:
             self.message.emit(f'Сорвалось: {e.__class__.__name__}: {e}')
         self.finished.emit()
@@ -1050,6 +1123,18 @@ class Window(QWidget):
         run_row.addWidget(self.chk_clear)
         run_row.addStretch()
 
+        self.ed_merge = QLineEdit(cfg.merge_dir)
+        self.ed_merge.setPlaceholderText(
+            'каталог с выходными файлами нескольких проектов')
+        self.btn_merge = QPushButton('Объединить')
+        self.btn_merge.clicked.connect(self.start_merge)
+        merge_row = QHBoxLayout()
+        merge_row.addWidget(self.ed_merge)
+        merge_row.addWidget(self.browse_button(self.pick_merge))
+        merge_row.addWidget(self.btn_merge)
+        box_merge = QGroupBox('Объединение выходных файлов по каталогу')
+        box_merge.setLayout(merge_row)
+
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMinimumHeight(180)
@@ -1069,13 +1154,18 @@ class Window(QWidget):
         root.addWidget(box_files)
         root.addLayout(middle)
         root.addLayout(run_row)
+        root.addWidget(box_merge)
         root.addWidget(QLabel('Журнал'))
         root.addWidget(self.log_view)
         self.resize(880, 720)
 
-    def with_browse(self, edit: QLineEdit, slot) -> QWidget:
+    def browse_button(self, slot) -> QPushButton:
         btn = QPushButton('Обзор…')
         btn.clicked.connect(slot)
+        return btn
+
+    def with_browse(self, edit: QLineEdit, slot) -> QWidget:
+        btn = self.browse_button(slot)
         box = QHBoxLayout()
         box.setContentsMargins(0, 0, 0, 0)
         box.addWidget(edit)
@@ -1151,6 +1241,12 @@ class Window(QWidget):
         if name:
             self.ed_f2.setText(name)
 
+    def pick_merge(self):
+        name = QFileDialog.getExistingDirectory(
+            self, 'Каталог с выходными файлами', self.ed_merge.text())
+        if name:
+            self.ed_merge.setText(name)
+
     def pick_out(self):
         name = QFileDialog.getExistingDirectory(
             self, 'Каталог вывода', self.ed_out.text() or self.ed_f1.text())
@@ -1169,6 +1265,7 @@ class Window(QWidget):
         self.ed_f1.setText(s.value('f1_path', self.ed_f1.text()))
         self.ed_f2.setText(s.value('f2_path', self.ed_f2.text()))
         self.ed_out.setText(s.value('out_dir', ''))
+        self.ed_merge.setText(s.value('merge_dir', ''))
         for key, box in (('pv_col', self.sp_pv), ('x1_col', self.sp_x1),
                          ('x2_col', self.sp_x2), ('t0_col', self.sp_t0),
                          ('v_col', self.sp_v), ('round_step', self.sp_round),
@@ -1200,6 +1297,7 @@ class Window(QWidget):
         s.setValue('f1_path', self.ed_f1.text())
         s.setValue('f2_path', self.ed_f2.text())
         s.setValue('out_dir', self.ed_out.text())
+        s.setValue('merge_dir', self.ed_merge.text())
         for key, box in (('pv_col', self.sp_pv), ('x1_col', self.sp_x1),
                          ('x2_col', self.sp_x2), ('t0_col', self.sp_t0),
                          ('v_col', self.sp_v), ('round_step', self.sp_round),
@@ -1257,6 +1355,25 @@ class Window(QWidget):
     def append(self, text: str):
         self.log_view.appendPlainText(text)
 
+    def launch(self, job, note: str):
+        """Пустить задание в отдельном потоке. Кнопки на это время заперты:
+        оба задания пишут в одни и те же файлы."""
+        if self.chk_clear.isChecked():
+            self.log_view.clear()
+        self.save_settings()
+        for btn in (self.btn_run, self.btn_merge):
+            btn.setEnabled(False)
+        self.append(note)
+
+        self.thread = QThread(self)
+        self.worker = Worker(job)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.work)
+        self.worker.message.connect(self.append)
+        self.worker.finished.connect(self.thread.quit)
+        self.thread.finished.connect(self.done)
+        self.thread.start()
+
     def start(self):
         try:
             cfg = self.collect()
@@ -1267,25 +1384,20 @@ class Window(QWidget):
         if err:
             QMessageBox.warning(self, 'Слои', err)
             return
-        if self.chk_clear.isChecked():
-            self.log_view.clear()
-        self.save_settings()
-        self.btn_run.setEnabled(False)
-        self.append('Считаю…')
+        self.launch(lambda log: run(cfg, log), 'Считаю…')
 
-        self.thread = QThread(self)
-        self.worker = Worker(cfg)
-        self.worker.moveToThread(self.thread)
-        self.thread.started.connect(self.worker.work)
-        self.worker.message.connect(self.append)
-        self.worker.finished.connect(self.thread.quit)
-        self.thread.finished.connect(self.done)
-        self.thread.start()
+    def start_merge(self):
+        folder = self.ed_merge.text().strip()
+        if not folder:
+            QMessageBox.warning(self, 'Объединение', 'Не задан каталог')
+            return
+        self.launch(lambda log: merge_dir(folder, log), 'Объединяю…')
 
     @Slot()
     def done(self):
         self.append('Готово')
-        self.btn_run.setEnabled(True)
+        for btn in (self.btn_run, self.btn_merge):
+            btn.setEnabled(True)
         self.worker = None
         self.thread = None
 
