@@ -65,7 +65,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, QThread, Qt, Signal, Slot
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QDoubleSpinBox,
                                QFileDialog, QFormLayout, QGridLayout,
                                QGroupBox, QHBoxLayout, QHeaderView, QLabel,
@@ -1041,6 +1041,7 @@ class Window(QWidget):
         self.cfg = Config()
         self.thread = None
         self.worker = None
+        self.dlg_format = None
         self.build_ui()
         self.load_settings()
 
@@ -1055,10 +1056,17 @@ class Window(QWidget):
         self.ed_out = QLineEdit(cfg.out_dir)
         self.ed_out.setPlaceholderText('пусто — класть рядом с файлом LMO')
 
+        self.btn_format = QPushButton('Колонки и позиции…')
+        self.btn_format.clicked.connect(self.show_format)
+        format_row = QHBoxLayout()
+        format_row.addWidget(self.btn_format)
+        format_row.addStretch()
+
         files = QFormLayout()
         files.addRow('Файл LMO', self.with_browse(self.ed_f1, self.pick_f1))
         files.addRow('Файл SPS', self.with_browse(self.ed_f2, self.pick_f2))
         files.addRow('Каталог вывода', self.with_browse(self.ed_out, self.pick_out))
+        files.addRow('Разбор файлов', format_row)
         box_files = QGroupBox('Файлы')
         box_files.setLayout(files)
 
@@ -1073,8 +1081,8 @@ class Window(QWidget):
         cols.addRow('Макс. удаление', self.sp_x2)
         cols.addRow('Интерсепт, мс', self.sp_t0)
         cols.addRow('Скорость, м/с', self.sp_v)
-        box_cols = QGroupBox('Колонки в файле LMO (с нуля)')
-        box_cols.setLayout(cols)
+        self.box_cols = QGroupBox('Колонки в файле LMO (с нуля)')
+        self.box_cols.setLayout(cols)
 
         self.sps_spins = {}
         grid = QGridLayout()
@@ -1089,8 +1097,8 @@ class Window(QWidget):
             grid.addWidget(QLabel(title), row, 0)
             grid.addWidget(a, row, 1)
             grid.addWidget(b, row, 2)
-        box_sps = QGroupBox('Позиции в SPS (с единицы, границы включительно)')
-        box_sps.setLayout(grid)
+        self.box_sps = QGroupBox('Позиции в SPS (с единицы, границы включительно)')
+        self.box_sps.setLayout(grid)
 
         self.tbl = QTableWidget(0, 3)
         self.tbl.setHorizontalHeaderLabels(['Слой', 'V мин, м/с', 'V макс, м/с'])
@@ -1177,16 +1185,11 @@ class Window(QWidget):
         self.log_view.setReadOnly(True)
         self.log_view.setMinimumHeight(180)
 
-        left = QVBoxLayout()
-        left.addWidget(box_cols)
-        left.addWidget(box_sps)
-        left.addStretch()
-        right = QVBoxLayout()
-        right.addWidget(box_lay)
-        right.addWidget(box_calc)
+        # колонки LMO и позиции SPS — в отдельном окне: их правят раз на партию,
+        # а место в основном занимали постоянно
         middle = QHBoxLayout()
-        middle.addLayout(left)
-        middle.addLayout(right)
+        middle.addWidget(box_lay)
+        middle.addWidget(box_calc)
 
         root = QVBoxLayout(self)
         root.addWidget(box_files)
@@ -1195,7 +1198,27 @@ class Window(QWidget):
         root.addWidget(box_merge)
         root.addWidget(QLabel('Журнал'))
         root.addWidget(self.log_view)
-        self.resize(880, 720)
+        self.resize(840, 620)
+
+    def show_format(self):
+        """Окно разбора файлов. Немодальное и живёт до конца сессии: группы в нём
+        принадлежат этому окну, и пересоздавать его значило бы их разрушить."""
+        if self.dlg_format is None:
+            dlg = QDialog(self)
+            dlg.setWindowTitle('Разбор файлов LMO и SPS')
+            btn = QPushButton('Закрыть')
+            btn.clicked.connect(dlg.hide)
+            row = QHBoxLayout()
+            row.addStretch()
+            row.addWidget(btn)
+            box = QVBoxLayout(dlg)
+            box.addWidget(self.box_cols)
+            box.addWidget(self.box_sps)
+            box.addLayout(row)
+            self.dlg_format = dlg
+        self.dlg_format.show()
+        self.dlg_format.raise_()
+        self.dlg_format.activateWindow()
 
     def browse_button(self, slot) -> QPushButton:
         btn = QPushButton('Обзор…')
