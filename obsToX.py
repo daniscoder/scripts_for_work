@@ -3,8 +3,11 @@
 
 import os
 
+# Разовые входы и результаты - в песочнице рядом со скриптом
+SANDBOX = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sandbox')
+
 def main():
-    filename = r'/mp/home/danis/Downloads/raport.obs'
+    filename = os.path.join(SANDBOX, 'raport.obs')
 
     if os.path.exists(filename):
         fname, fext = os.path.splitext(filename)

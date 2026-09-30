@@ -3,9 +3,12 @@
 
 import os
 
+# Разовые входы и результаты - в песочнице рядом со скриптом
+SANDBOX = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sandbox')
+
 def main():
-    filename1 = r'/mp/home/danis/Downloads/Zap-Bykovskaja.x'
-    filename2 = r'/mp/home/danis/Downloads/Zap-Bykovskaja_red.x'
+    filename1 = os.path.join(SANDBOX, 'Zap-Bykovskaja.x')
+    filename2 = os.path.join(SANDBOX, 'Zap-Bykovskaja_red.x')
 
     if os.path.exists(filename1) and os.path.exists(filename2):
         f1 = open(filename1, 'r')
