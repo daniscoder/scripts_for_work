@@ -1,6 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import re
+from pathlib import Path
+
+# Вход и результат - в песочнице рядом со скриптом, откуда бы его ни запустили
+SANDBOX = Path(__file__).resolve().parent / 'sandbox'
 
 
 def block_key(path):
@@ -11,12 +15,18 @@ def block_key(path):
 
 
 if __name__ == '__main__':
-    with open('paths.txt', 'r') as f:
+    src = SANDBOX / 'paths.txt'
+    if not src.exists():
+        SANDBOX.mkdir(exist_ok=True)
+        src.touch()
+        print(f'Вставьте пути по одному в строке в {src} и запустите еще раз')
+        raise SystemExit(1)
+    with open(src, 'r') as f:
         paths = [line.strip() for line in f if line.strip()]
     paths.sort(key=block_key)
 
     result = ' '.join(f'"{path}"' for path in paths)
     print(result)
 
-    with open('paths_result.txt', 'w') as f:
+    with open(SANDBOX / 'paths_result.txt', 'w') as f:
         f.write(result)
