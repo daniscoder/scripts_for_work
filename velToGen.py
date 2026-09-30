@@ -3,8 +3,11 @@
 
 import os
 
+# Разовые входы и результаты - в песочнице рядом со скриптом
+SANDBOX = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sandbox')
+
 def main():
-    pathIn = r'C:\Users\danis\PycharmProjects\test'
+    pathIn = os.path.join(SANDBOX, 'vel')  # папка: берутся все .txt, кроме _gen
 
     if os.path.exists(pathIn):
         isfile = os.path.isfile(pathIn)

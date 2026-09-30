@@ -3,9 +3,12 @@
 
 import os
 
+# Разовые входы и результаты - в песочнице рядом со скриптом
+SANDBOX = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sandbox')
+
 
 def main():
-    offs_var_txt = r'C:\pycharm\pythonProject\crs_off.txt'
+    offs_var_txt = os.path.join(SANDBOX, 'crs_off.txt')
     file_in = r'u:\santalovskiy\santalovskiy\text_files\CRS_MPFI\mpfi.txt'
     off_min = 25
     off_dif = 50
